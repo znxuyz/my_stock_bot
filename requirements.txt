@@ -1,3 +1,4 @@
 FinMind
 requests
 pandas
+tqdm
