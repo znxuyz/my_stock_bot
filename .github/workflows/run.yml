@@ -1,8 +1,8 @@
 name: Daily Stock Bot
 on:
   schedule:
-    - cron: '0 0 * * 2-6' # 台北時間週二至週六 08:00 (分析前一交易日)
-  workflow_dispatch: # 保留手動執行按鈕
+    - cron: '0 0 * * *' # 台北時間每天早上 08:00 執行
+  workflow_dispatch: # 保留手動測試按鈕
 
 jobs:
   run_bot:
@@ -19,7 +19,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas tqdm FinMind
+          pip install requests pandas FinMind
           
       - name: Run script
         env:
