@@ -1,88 +1,83 @@
-import os
-import requests
+import os, requests, time
 import pandas as pd
 from datetime import datetime, timedelta
 
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
+def fetch_twse_data(url):
+    """加強版請求：自動重試並偽裝瀏覽器"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+    for _ in range(3): # 失敗自動重試 3 次
+        try:
+            res = requests.get(url, headers=headers, timeout=20)
+            if res.status_code == 200:
+                return res.json()
+        except:
+            time.sleep(5)
+    return None
+
 def run_analysis():
     if not WEBHOOK_URL: return
     
-    # 1. 抓取前一交易日
+    # 抓取最後一個交易日 (考慮週末)
     target_date = datetime.now() - timedelta(days=1)
     if target_date.weekday() == 5: target_date -= timedelta(days=1)
     elif target_date.weekday() == 6: target_date -= timedelta(days=2)
     date_str = target_date.strftime("%Y%m%d")
 
     try:
-        # 2. 獲取行情 (處理 data9 報錯問題)
-        p_url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999"
-        p_res = requests.get(p_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20).json()
-        
-        # 自動尋找行情資料表 (不再寫死 data9)
-        p_data_list = []
-        p_fields = []
-        for key in p_res.keys():
-            if 'data' in key and p_res[key] and len(p_res[key][0]) > 10:
-                p_data_list = p_res[key]
-                p_fields = p_res.get(key.replace('data', 'fields'), [])
-                break
-        
-        # 3. 獲取法人資料
-        i_url = f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL"
-        i_res = requests.get(i_url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=20).json()
+        # 1. 抓取行情 (MI_INDEX)
+        p_data = fetch_twse_data(f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=json&date={date_str}&type=ALLBUT0999")
+        # 2. 抓取法人 (T86)
+        i_data = fetch_twse_data(f"https://www.twse.com.tw/fund/T86?response=json&date={date_str}&selectType=ALL")
 
-        if not p_data_list or i_res.get('stat') != 'OK':
-            requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": f"📅 {date_str} 資料尚未準備妥當。"})
+        if not p_data or p_data.get('stat') != 'OK' or not i_data or i_data.get('stat') != 'OK':
+            requests.post(WEBHOOK_URL, json={"content": f"📅 報告：{date_str} 證交所資料還在睡覺或結算中，請晚點再叫我。"})
             return
 
-        # 4. 處理資料
-        df_p = pd.DataFrame(p_data_list, columns=p_fields)
-        df_i = pd.DataFrame(i_res['data'], columns=i_res['fields'])
-        df_i['合計買超張數'] = df_i.iloc[:, -1].str.replace(',', '').astype(float) / 1000
+        # --- 動態找行情表 (關鍵修復) ---
+        p_list, p_fields = [], []
+        for k, v in p_data.items():
+            if 'data' in k and v and len(v[0]) > 10: # 只要欄位數夠多就是我們要的行情表
+                p_list, p_fields = v, p_data.get(k.replace('data', 'fields'), [])
+                break
+
+        df_p = pd.DataFrame(p_list, columns=p_fields)
+        df_i = pd.DataFrame(i_data['data'], columns=i_data['fields'])
+        df_i['法人買超'] = df_i.iloc[:, -1].str.replace(',', '').astype(float) / 1000
 
         results = []
-        # 5. 合併與分級 (邏輯優化)
-        for _, row in df_i.sort_values(by='合計買超張數', ascending=False).head(100).iterrows():
-            sid = row['證券代號']
-            name = row['證券名稱']
-            inst_vol = int(row['合計買超張數'])
+        for _, row in df_i.sort_values(by='法人買超', ascending=False).head(100).iterrows():
+            sid, name = row['證券代號'], row['證券名稱']
+            vol = int(row['法人買超'])
             
             match = df_p[df_p['證券代號'] == sid]
             if match.empty: continue
             
-            p_row = match.iloc[0]
-            price = p_row['收盤價']
-            
             # 漲跌計算
+            p_row = match.iloc[0]
             try:
-                sign = p_row['漲跌(+/-)']
+                price = p_row['收盤價']
                 diff = float(p_row['漲跌價'].replace(',', ''))
-                if '−' in sign or '-' in sign: diff *= -1
-                
+                if '−' in p_row['漲跌(+/-)'] or '-' in p_row['漲跌(+/-)']: diff *= -1
                 prev = float(price.replace(',', '')) - diff
                 change = round((diff / prev) * 100, 2)
-            except: change = 0.0
+            except: continue
 
-            # --- 川投顧三等級標準 ---
-            rank_tag = ""
-            if change >= 7.0 and inst_vol > 0: rank_tag = "🔥【SS 級】"
-            elif change >= 3.5 and inst_vol > 0: rank_tag = "💎【S 級】"
-            elif change >= 1.0: rank_tag = "📈【A 級】"
+            # --- 川投顧分級系統 ---
+            tag = ""
+            if change >= 7.0 and vol > 0: tag = "🔥【SS 級】"
+            elif change >= 3.5 and vol > 0: tag = "💎【S 級】"
+            elif change >= 1.0: tag = "📈【A 級】"
             
-            if rank_tag:
-                results.append(f"{rank_tag} **[{sid} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人買超：{inst_vol} 張")
+            if tag:
+                results.append(f"{tag} **[{sid} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{vol} 張")
 
-        # 6. 送出報告
-        if results:
-            content = f"☀️ **【川投顧：{date_str} 三等級報告】**\n\n" + "\n\n".join(results[:15])
-        else:
-            content = f"📅 {date_str} 盤面太悶，法人沒在動。"
-
-        requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": content})
+        msg = f"☀️ **【川投顧：{date_str} 三等級全解析】**\n\n" + "\n\n".join(results[:15]) if results else "📅 盤面太廢，沒標的。"
+        requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": msg})
 
     except Exception as e:
-        requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": f"❌ 系統炸裂：{str(e)}"})
+        requests.post(WEBHOOK_URL, json={"content": f"❌ 報警！系統又抽風了：{str(e)}"})
 
 if __name__ == "__main__":
     run_analysis()
