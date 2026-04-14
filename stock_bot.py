@@ -8,50 +8,60 @@ from datetime import datetime
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
 def run_analysis():
+    # 加入檢查，避免 URL 為空
+    if not WEBHOOK_URL:
+        print("錯誤：找不到 DISCORD_WEBHOOK 設定")
+        return
+
     api = DataLoader()
-    today = datetime.now().strftime("%Y-%m-%d")
-    print(f"開始分析 {today} 資料...")
+    # 這裡我們不指定日期，讓 FinMind 回傳最新一筆
+    print("🚀 開始連線 FinMind 抓取最新數據...")
 
     try:
-        # 1. 使用最基礎的 fetch_data 指令
-        # 抓取今日全台股成交資訊
-        df_price = api.fetch_data(dataset="TaiwanStockPriceTick", data_id="Full")
+        # 使用最單純的指令：直接抓取今日全台股行情
+        # 如果當天還沒收盤，會自動回傳前一個交易日的資料
+        df_price = api.taiwan_stock_daily_ranking()
         
-        # 2. 檢查資料是否為空
-        if df_price is None or df_price.empty:
-            requests.post(WEBHOOK_URL, json={"content": f"⚠️ {today} 暫無資料 (可能是尚未收盤或 API 維護中)"})
-            return
-
-        # 3. 抓取法人資料
-        df_inst = api.fetch_data(dataset="TaiwanStockInstitutionalInvestorsAll", data_id="")
+        # 抓取法人
+        df_inst = api.taiwan_stock_institutional_investors_all()
 
         results = []
-        # 簡單過濾：漲幅 > 3.5%
-        # 注意：不同版本欄位名不同，我們做容錯處理
-        for _, row in df_price.iterrows():
-            change_p = row.get('change_rate', 0)
-            vol = row.get('volume', 0)
-            sid = row.get('stock_id', '')
-
-            if change_p >= 3.5 and vol >= 1000:
-                # 比對法人
-                if not df_inst.empty:
-                    inst_buy = df_inst[df_inst['stock_id'] == sid]['buy'].sum()
-                    if inst_buy > 0:
-                        results.append(f"🚀 **[{sid}]** 收盤: {row.get('close')} (+{change_p}%) 量: {int(vol)}")
-
-        # 4. 發送結果
-        if results:
-            msg = f"📊 **【AI 動能雷達】**\n" + "\n".join(results[:15])
-        else:
-            msg = f"📅 {today} 掃描完畢，未發現符合條件標的。"
         
-        requests.post(WEBHOOK_URL, json={"content": msg})
-        print("發送成功")
+        # 檢查資料是否完整
+        if df_price is not None and not df_price.empty:
+            # 只掃描前 200 檔最熱門的股票，增加穩定度
+            for _, row in df_price.head(200).iterrows():
+                # 取得數值，加入預設值避免報錯
+                change_p = row.get('change_rate', 0)
+                vol = row.get('volume', 0)
+                sid = row.get('stock_id', '')
+                name = row.get('stock_name', '未知')
+                close = row.get('close', 0)
+
+                # 核心篩選條件：漲幅 > 3.5% 且 成交量 > 1000張
+                if change_p >= 3.5 and vol >= 1000:
+                    # 簡單檢查法人是否有買（不檢查詳細張數，只要有資料就算）
+                    if not df_inst.empty and sid in df_inst['stock_id'].values:
+                        results.append(f"🔥 **[{sid} {name}]**\n收盤：{close} (+{change_p}%)\n量能：{int(vol)} 張")
+
+        # 整理發送訊息
+        if results:
+            content = "📊 **【AI 動能突破雷達 - 雲端版】**\n偵測到符合條件標的：\n\n" + "\n\n".join(results[:15])
+        else:
+            content = "📅 掃描完畢，今日未發現符合強勢起漲條件的標的。"
+
+        # 正式發送
+        res = requests.post(WEBHOOK_URL, json={"content": content})
+        if res.status_code == 204:
+            print("✅ Discord 訊息發送成功！")
+        else:
+            print(f"❌ 發送失敗，狀態碼：{res.status_code}")
 
     except Exception as e:
-        # 萬一真的出錯，把錯誤訊息傳到 Discord 讓我們知道哪裡壞了
-        requests.post(WEBHOOK_URL, json={"content": f"❌ 執行中斷: {str(e)}"})
+        # 捕捉任何錯誤並傳回 Discord，這樣你才知道發生什麼事
+        error_msg = f"❌ 執行過程中發生錯誤：{str(e)}"
+        requests.post(WEBHOOK_URL, json={"content": error_msg})
+        print(error_msg)
 
 if __name__ == "__main__":
     run_analysis()
