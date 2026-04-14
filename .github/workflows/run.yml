@@ -1,0 +1,21 @@
+name: Daily Stock Bot
+on:
+  schedule:
+    - cron: '10 9 * * 1-5' # 這是 UTC 9:10，等於台北時間 17:10
+  workflow_dispatch: # 也可以手動點擊執行
+
+jobs:
+  run_bot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run script
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python stock_bot.py
