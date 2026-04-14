@@ -1,22 +1,27 @@
 name: Daily Stock Bot
 on:
   schedule:
-    - cron: '10 9 * * 1-5' # 台北時間 17:10 自動執行
+    - cron: '0 0 * * 2-6' # 台北時間週二至週六 08:00 (分析前一交易日)
   workflow_dispatch: # 保留手動執行按鈕
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4 # 升級到 v4 解決警告
+      - name: Checkout Code
+        uses: actions/checkout@v4
+      
       - name: Set up Python
-        uses: actions/setup-python@v5 # 升級到 v5 確保環境穩定
+        uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+          
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          python -m pip install --upgrade pip
+          pip install requests pandas tqdm FinMind
+          
       - name: Run script
         env:
-          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }} # 確保這行有對應到你的 Secrets
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python stock_bot.py
