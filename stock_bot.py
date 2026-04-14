@@ -38,7 +38,7 @@ def run_analysis():
         else:
             msg = f"📅 {datetime.now().strftime('%Y-%m-%d')} 掃描完畢，未發現符合標的。"
 
-        requests.post(WEBHOOK_URL, json={"content": msg, "username": "台股分析助手"})
+        requests.post(WEBHOOK_URL, json={"content": msg, "username": "川投顧嘴砲量化系統"})
         print("Done!")
     except Exception as e:
         requests.post(WEBHOOK_URL, json={"content": f"❌ 錯誤：{str(e)}"})
