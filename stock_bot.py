@@ -58,7 +58,6 @@ def run_analysis():
                 tag = ""
                 if change >= 7.0: tag = "🔥【SS 級】"
                 elif change >= 3.5: tag = "💎【S 級】"
-                elif change >= 1.0: tag = "📈【A 級】"
                 else: tag = "📊【測試級】"
                     
                 if tag:
