@@ -2,44 +2,56 @@ import os
 import requests
 import pandas as pd
 from FinMind.data import DataLoader
-from datetime import datetime, timedelta
+from datetime import datetime
 
-# 從 GitHub 安全設定中抓取 Webhook
+# 從 GitHub Secrets 抓取
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
 def run_analysis():
     api = DataLoader()
-    # 抓取今天日期
     today = datetime.now().strftime("%Y-%m-%d")
-    
+    print(f"開始分析 {today} 資料...")
+
     try:
-        # 使用最底層 fetch_data，完全避開函數名稱變動問題
-        # 抓取當日成交資訊排行
-        df_price = api.fetch_data(dataset="TaiwanStockDailyRanking", data_id="")
-        # 抓取今日法人買賣超
-        df_inst = api.fetch_data(dataset="TaiwanStockInstitutionalInvestorsAll", data_id="")
+        # 1. 使用最基礎的 fetch_data 指令
+        # 抓取今日全台股成交資訊
+        df_price = api.fetch_data(dataset="TaiwanStockPriceTick", data_id="Full")
         
+        # 2. 檢查資料是否為空
+        if df_price is None or df_price.empty:
+            requests.post(WEBHOOK_URL, json={"content": f"⚠️ {today} 暫無資料 (可能是尚未收盤或 API 維護中)"})
+            return
+
+        # 3. 抓取法人資料
+        df_inst = api.fetch_data(dataset="TaiwanStockInstitutionalInvestorsAll", data_id="")
+
         results = []
-        # 過濾前 200 檔活躍股
-        for _, row in df_price.head(200).iterrows():
-            change_rate = row.get('change_rate', 0)
-            volume = row.get('volume', 0)
-            stock_id = row.get('stock_id', '')
-            
-            # 你的核心條件：漲幅 > 3.5% 且 成交量 > 1000張
-            if change_rate >= 3.5 and volume > 1000:
-                inst_match = df_inst[df_inst['stock_id'] == stock_id]
-                if not inst_match.empty and inst_match['buy'].sum() > 0:
-                    results.append(f"🚀 **[{stock_id} {row.get('stock_name','')}]**\n收盤：{row.get('close')} (+{change_rate}%)\n量能：{int(volume)} 張")
+        # 簡單過濾：漲幅 > 3.5%
+        # 注意：不同版本欄位名不同，我們做容錯處理
+        for _, row in df_price.iterrows():
+            change_p = row.get('change_rate', 0)
+            vol = row.get('volume', 0)
+            sid = row.get('stock_id', '')
 
+            if change_p >= 3.5 and vol >= 1000:
+                # 比對法人
+                if not df_inst.empty:
+                    inst_buy = df_inst[df_inst['stock_id'] == sid]['buy'].sum()
+                    if inst_buy > 0:
+                        results.append(f"🚀 **[{sid}]** 收盤: {row.get('close')} (+{change_p}%) 量: {int(vol)}")
+
+        # 4. 發送結果
         if results:
-            msg = f"📊 **【雲端 AI 動能偵測】**\n日期：{today}\n\n" + "\n\n".join(results[:10])
+            msg = f"📊 **【AI 動能雷達】**\n" + "\n".join(results[:15])
         else:
-            msg = f"📅 {today} 掃描完成，未發現符合標的。"
-
+            msg = f"📅 {today} 掃描完畢，未發現符合條件標的。"
+        
         requests.post(WEBHOOK_URL, json={"content": msg})
+        print("發送成功")
+
     except Exception as e:
-        requests.post(WEBHOOK_URL, json={"content": f"❌ 執行出錯: {str(e)}"})
+        # 萬一真的出錯，把錯誤訊息傳到 Discord 讓我們知道哪裡壞了
+        requests.post(WEBHOOK_URL, json={"content": f"❌ 執行中斷: {str(e)}"})
 
 if __name__ == "__main__":
     run_analysis()
