@@ -59,7 +59,8 @@ def run_analysis():
                 if change >= 7.0: tag = "🔥【SS 級】"
                 elif change >= 3.5: tag = "💎【S 級】"
                 elif change >= 1.0: tag = "📈【A 級】"
-                
+                else: tag = "📊【測試級】"
+                    
                 if tag:
                     results.append((change, f"{tag} **[{row['sid_clean']} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{int(vol)} 張"))
             except: continue
