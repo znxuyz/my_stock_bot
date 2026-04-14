@@ -1,27 +1,31 @@
 name: Daily Stock Bot
+
 on:
   schedule:
-    - cron: '0 0 * * *' # 台北時間每天早上 08:00 執行
-  workflow_dispatch: # 手動執行按鈕
+    # 這裡的 cron 是 UTC 時間，台灣時間 = UTC + 8
+    # 下午 18:00 (台灣) = 10:00 (UTC)
+    - cron: '0 10 * * 1-5'
+    # 隔日 08:00 (台灣) = 00:00 (UTC)
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch: # 保留手動觸發功能，讓你隨時想測就能測
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
-      
+        uses: actions/checkout@v3
+
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.12'
-          
-      - name: Install dependencies
+          python-version: '3.9'
+
+      - name: Install Dependencies
         run: |
-          python -m pip install --upgrade pip
-          pip install requests pandas FinMind
-          
-      - name: Run script
+          pip install pandas requests
+
+      - name: Run Analysis
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
         run: python stock_bot.py
