@@ -43,7 +43,7 @@ def run_analysis():
                 price = row.get('close')
 
                 # 篩選標準：漲幅 > 3.5% 且 成交量 > 1000張
-                if change >= 3.5 and vol >= 1000:
+                if change >= 1 and vol >= 10:
                     inst_match = df_inst[df_inst['stock_id'] == sid]
                     has_inst_buy = not inst_match.empty and inst_match['buy'].sum() > 0
                     
