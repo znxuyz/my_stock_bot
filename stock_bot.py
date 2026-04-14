@@ -1,67 +1,47 @@
 import os
 import requests
 import pandas as pd
-from FinMind.data import DataLoader
 from datetime import datetime
 
 # 從 GitHub Secrets 抓取
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
 def run_analysis():
-    # 加入檢查，避免 URL 為空
     if not WEBHOOK_URL:
-        print("錯誤：找不到 DISCORD_WEBHOOK 設定")
         return
 
-    api = DataLoader()
-    # 這裡我們不指定日期，讓 FinMind 回傳最新一筆
-    print("🚀 開始連線 FinMind 抓取最新數據...")
-
+    # 1. 直接用 API 抓取「今日排行」
+    url = "https://api.finmindtrade.com/api/v4/data?dataset=TaiwanStockDailyRanking"
     try:
-        # 使用最單純的指令：直接抓取今日全台股行情
-        # 如果當天還沒收盤，會自動回傳前一個交易日的資料
-        df_price = api.taiwan_stock_daily_ranking()
-        
-        # 抓取法人
-        df_inst = api.taiwan_stock_institutional_investors_all()
+        res = requests.get(url)
+        data = res.json().get('data', [])
+        df_price = pd.DataFrame(data)
 
+        # 2. 篩選邏輯
         results = []
-        
-        # 檢查資料是否完整
-        if df_price is not None and not df_price.empty:
-            # 只掃描前 200 檔最熱門的股票，增加穩定度
-            for _, row in df_price.head(200).iterrows():
-                # 取得數值，加入預設值避免報錯
-                change_p = row.get('change_rate', 0)
+        if not df_price.empty:
+            # 找出漲幅 > 3.5% 且成交量 > 1000張的股票
+            # 這裡我們專注在成交量前 150 名的標的，確保流動性
+            for _, row in df_price.head(150).iterrows():
+                change = row.get('change_rate', 0)
                 vol = row.get('volume', 0)
-                sid = row.get('stock_id', '')
-                name = row.get('stock_name', '未知')
-                close = row.get('close', 0)
+                
+                if change >= 3.5 and vol >= 1000:
+                    sid = row.get('stock_id')
+                    name = row.get('stock_name')
+                    price = row.get('close')
+                    results.append(f"🔥 **[{sid} {name}]**\n收盤：{price} (+{change}%)\n量能：{int(vol)} 張")
 
-                # 核心篩選條件：漲幅 > 3.5% 且 成交量 > 1000張
-                if change_p >= 3.5 and vol >= 1000:
-                    # 簡單檢查法人是否有買（不檢查詳細張數，只要有資料就算）
-                    if not df_inst.empty and sid in df_inst['stock_id'].values:
-                        results.append(f"🔥 **[{sid} {name}]**\n收盤：{close} (+{change_p}%)\n量能：{int(vol)} 張")
-
-        # 整理發送訊息
+        # 3. 發送訊息
         if results:
-            content = "📊 **【AI 動能突破雷達 - 雲端版】**\n偵測到符合條件標的：\n\n" + "\n\n".join(results[:15])
+            msg = "📊 **【AI 雲端偵測：強勢起漲股】**\n\n" + "\n\n".join(results[:10])
         else:
-            content = "📅 掃描完畢，今日未發現符合強勢起漲條件的標的。"
+            msg = f"📅 {datetime.now().strftime('%Y-%m-%d')} 掃描完畢，未發現符合標的。"
 
-        # 正式發送
-        res = requests.post(WEBHOOK_URL, json={"content": content})
-        if res.status_code == 204:
-            print("✅ Discord 訊息發送成功！")
-        else:
-            print(f"❌ 發送失敗，狀態碼：{res.status_code}")
-
+        requests.post(WEBHOOK_URL, json={"content": msg})
+        print("Done!")
     except Exception as e:
-        # 捕捉任何錯誤並傳回 Discord，這樣你才知道發生什麼事
-        error_msg = f"❌ 執行過程中發生錯誤：{str(e)}"
-        requests.post(WEBHOOK_URL, json={"content": error_msg})
-        print(error_msg)
+        requests.post(WEBHOOK_URL, json={"content": f"❌ 錯誤：{str(e)}"})
 
 if __name__ == "__main__":
     run_analysis()
