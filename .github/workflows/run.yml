@@ -2,30 +2,46 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    # 這裡的 cron 是 UTC 時間，台灣時間 = UTC + 8
-    # 下午 18:00 (台灣) = 10:00 (UTC)
+    # 盤後結算：週一至週五 18:00 台灣時間（= UTC 10:00）
     - cron: '0 10 * * 1-5'
-    # 隔日 08:00 (台灣) = 00:00 (UTC)
-    - cron: '0 0 * * 1-5'
-  workflow_dispatch: # 保留手動觸發功能，讓你隨時想測就能測
+    # 盤前複習：週二至週六 08:00 台灣時間（= UTC 00:00）
+    - cron: '0 0 * * 2-6'
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: '執行模式 (close=盤後 / preview=盤前)'
+        required: false
+        default: 'close'
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
-      - name: Checkout Code
-        uses: actions/checkout@v3
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.9'
+          python-version: '3.11'
 
-      - name: Install Dependencies
+      - name: Install dependencies
+        run: pip install requests pandas
+
+      - name: Set RUN_MODE
         run: |
-          pip install pandas requests
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RUN_MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
+          elif [ "$(date -u +%H)" = "00" ]; then
+            echo "RUN_MODE=preview" >> $GITHUB_ENV
+          else
+            echo "RUN_MODE=close" >> $GITHUB_ENV
+          fi
 
-      - name: Run Analysis
+      - name: Run bot
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+          RUN_MODE: ${{ env.RUN_MODE }}
         run: python stock_bot.py
