@@ -1,20 +1,26 @@
 name: Daily Stock Bot
 on:
   schedule:
-    - cron: '10 9 * * 1-5' # 這是 UTC 9:10，等於台北時間 17:10
-  workflow_dispatch: # 也可以手動點擊執行
+    - cron: '10 9 * * 1-5' # 台北時間 17:10
+  workflow_dispatch:
 
 jobs:
   run_bot:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - name: Checkout Code
+        uses: actions/checkout@v4 # 升級到 v4 解決 Node.js 舊版本問題
+      
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5 # 升級到 v5 確保環境最穩定
         with:
-          python-version: '3.10'
+          python-version: '3.12' # 使用更穩定的版本
+          
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pandas FinMind tqdm
+          
       - name: Run script
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
