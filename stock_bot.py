@@ -7,37 +7,49 @@ WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 def clean_sid(series):
     return series.astype(str).str.replace(r'[=" \t]', '', regex=True).str.strip()
 
+def get_market_info(date_str):
+    """獲取大盤加權指數與三大法人大盤買賣超"""
+    headers = {'User-Agent': 'Mozilla/5.0'}
+    try:
+        # 1. 大盤點數 (MI_INDEX)
+        p_res = requests.get(f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date_str}&type=IND", headers=headers)
+        df_m = pd.read_csv(io.StringIO(p_res.text), skiprows=1, thousands=',')
+        # 尋找「發行量加權股價指數」
+        taiex = df_m[df_m.iloc[:, 0] == '發行量加權股價指數'].iloc[0]
+        idx_price = taiex.iloc[1]
+        idx_sign = str(taiex.iloc[2])
+        idx_diff = pd.to_numeric(taiex.iloc[3], errors='coerce')
+        if '−' in idx_sign or '-' in idx_sign: idx_diff *= -1
+        idx_change = round((idx_diff / (idx_price - idx_diff)) * 100, 2)
+
+        # 2. 三大法人大盤買賣超金額 (BFI82U)
+        f_res = requests.get(f"https://www.twse.com.tw/fund/BFI82U?response=csv&dayDate={date_str}&type=day", headers=headers)
+        df_f = pd.read_csv(io.StringIO(f_res.text), skiprows=1, thousands=',')
+        total_buy = pd.to_numeric(df_f.iloc[-1, 3], errors='coerce') / 100000000 # 轉億元
+        
+        return f"📊 **加權指數：{idx_price} ({'+' if idx_diff>0 else ''}{idx_diff} / {'+' if idx_change>0 else ''}{idx_change}%)**\n💰 **三大法人大盤合計：{'+' if total_buy>0 else ''}{round(total_buy, 2)} 億**"
+    except:
+        return "📊 大盤數據：證交所尚未更新或解析失敗。"
+
 def run_analysis():
     if not WEBHOOK_URL: return
-    
-    now = datetime.now() + timedelta(hours=8) # 轉台灣時間
+    now = datetime.now() + timedelta(hours=8)
     is_morning = now.hour < 12
-    
-    # 如果是早上 8 點發送，要抓的是「昨天」的資料
-    # 如果是下午 18 點發送，抓的是「今天」的資料
     target_date = now if not is_morning else now - timedelta(days=1)
-    
-    # 排除週末 (如果是週一早上，要抓上週五的資料)
     if target_date.weekday() == 5: target_date -= timedelta(days=1)
     elif target_date.weekday() == 6: target_date -= timedelta(days=2)
-    
     date_str = target_date.strftime("%Y%m%d")
-    report_type = "【盤前複習：今日戰前準備】" if is_morning else "【盤後結算：今日戰報】"
+    
+    report_type = "【盤前複習】" if is_morning else "【盤後結算】"
+    market_header = get_market_info(date_str)
 
     try:
         headers = {'User-Agent': 'Mozilla/5.0'}
-        # 下載資料
         i_res = requests.get(f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALL", headers=headers)
         p_res = requests.get(f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date_str}&type=ALLBUT0999", headers=headers)
 
-        if "查詢無資料" in i_res.text:
-            requests.post(WEBHOOK_URL, json={"content": f"📅 {date_str} 查無資料，可能為休市日。"})
-            return
-
-        # 資料處理 (沿用之前的究極對齊邏輯)
         df_i = pd.read_csv(io.StringIO(i_res.text), skiprows=1, thousands=',')
         df_i = df_i[df_i.iloc[:, 0].str.contains('^[0-9A-Z]', na=False)].copy()
-        
         start_idx = p_res.text.find('"證券代號"')
         df_p = pd.read_csv(io.StringIO(p_res.text[start_idx:]), thousands=',').dropna(thresh=5)
 
@@ -60,7 +72,7 @@ def run_analysis():
                 if change >= 7.0 and vol > 0: tag = "🔥【SS 級】"
                 elif change >= 3.5 and vol > 0: tag = "💎【S 級】"
                 elif change >= 1.0 and vol > 0: tag = "📈【A 級】"
-                elif vol > 0: tag = "🔍【X 級】" # 只要買超 > 0 通通出來
+                elif vol > 0: tag = "🔍【X 級】"
                 
                 if tag:
                     results.append((change, f"{tag} **[{row['sid_clean']} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{int(vol)} 張"))
@@ -69,12 +81,11 @@ def run_analysis():
         results.sort(key=lambda x: x[0], reverse=True)
         final_list = [r[1] for r in results[:20]]
 
-        content = f"☀️ **川投顧 {report_type}**\n日期：{date_str}\n\n" + "\n\n".join(final_list)
+        content = f"☀️ **川投顧 {report_type}**\n日期：{date_str}\n{market_header}\n{'-'*30}\n\n" + "\n\n".join(final_list)
         requests.post(WEBHOOK_URL, json={"username": "川投顧量化系統", "content": content})
 
     except Exception as e:
-        # 如果失敗，噴出更詳細的錯誤，別只噴 (0) 了
-        requests.post(WEBHOOK_URL, json={"content": f"❌ 運作異常：{type(e).__name__} - {str(e)}"})
+        requests.post(WEBHOOK_URL, json={"content": f"❌ 運作異常：{str(e)}"})
 
 if __name__ == "__main__":
     run_analysis()
