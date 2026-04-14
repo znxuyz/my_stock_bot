@@ -2,7 +2,7 @@ name: Daily Stock Bot
 on:
   schedule:
     - cron: '0 0 * * *' # 台北時間每天早上 08:00 執行
-  workflow_dispatch: # 保留手動測試按鈕
+  workflow_dispatch: # 手動執行按鈕
 
 jobs:
   run_bot:
