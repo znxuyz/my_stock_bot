@@ -4,88 +4,98 @@ from datetime import datetime, timedelta
 
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 
+def safe_float(val):
+    """安全轉換浮點數，遇到空值或亂碼回傳 0.0"""
+    try:
+        if not val or not str(val).strip(): return 0.0
+        return float(str(val).replace(',', '').replace('"', '').strip())
+    except:
+        return 0.0
+
 def run_analysis():
     if not WEBHOOK_URL: return
     
-    # 1. 取得前一交易日
+    # 1. 取得前一交易日 (2026-04-14 下午會抓 04-13 的資料)
     target_date = datetime.now() - timedelta(days=1)
     if target_date.weekday() == 5: target_date -= timedelta(days=1)
     elif target_date.weekday() == 6: target_date -= timedelta(days=2)
     date_str = target_date.strftime("%Y%m%d")
 
     try:
-        # 2. 下載三大法人買賣超 CSV (這個連結比 JSON 穩定十倍)
-        i_url = f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALL"
-        i_res = requests.get(i_url, headers={'User-Agent': 'Mozilla/5.0'})
+        # 2. 抓取法人資料 CSV
+        i_res = requests.get(f"https://www.twse.com.tw/fund/T86?response=csv&date={date_str}&selectType=ALL", headers={'User-Agent': 'Mozilla/5.0'})
+        i_f = io.StringIO(i_res.text)
+        i_rows = [r for r in csv.reader(i_f) if len(r) > 10]
         
-        # 3. 解析 CSV
-        f = io.StringIO(i_res.text)
-        reader = csv.reader(f)
-        rows = [r for r in reader if len(r) > 10] # 只抓有內容的列
-        
-        if not rows:
-            requests.post(WEBHOOK_URL, json={"content": f"📅 {date_str} 證交所尚未提供 CSV 資料。"})
+        if not i_rows:
+            requests.post(WEBHOOK_URL, json={"content": f"📅 {date_str} 法人 CSV 尚未備妥。"})
             return
 
-        # 4. 處理數據 (CSV 的第一行通常是標題)
-        df_i = pd.DataFrame(rows[1:], columns=rows[0])
-        
-        # 5. 強制取得關鍵欄位 (用關鍵字找，不用索引)
-        # 我們找包含「代號」、「名稱」和最後一欄「合計」
-        sid_col = [c for c in df_i.columns if "代號" in c][0]
-        name_col = [c for c in df_i.columns if "名稱" in c][0]
-        vol_col = df_i.columns[-1] # 最後一欄一定是合計買賣超
+        df_i = pd.DataFrame(i_rows[1:], columns=i_rows[0])
+        vol_col = df_i.columns[-1] # 最後一欄：合計買賣超
 
-        df_i['vol_num'] = df_i[vol_col].str.replace('"', '').str.replace(',', '').astype(float) / 1000
-
-        # 6. 抓取行情 (一樣改用 CSV)
-        p_url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date_str}&type=ALLBUT0999"
-        p_res = requests.get(p_url, headers={'User-Agent': 'Mozilla/5.0'})
-        
-        # 簡單過濾行情 CSV
+        # 3. 抓取行情資料 CSV
+        p_res = requests.get(f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date_str}&type=ALLBUT0999", headers={'User-Agent': 'Mozilla/5.0'})
         p_f = io.StringIO(p_res.text)
-        p_rows = [r for r in csv.reader(p_f) if len(r) >= 16] # 行情表欄位很多
+        p_rows = [r for r in csv.reader(p_f) if len(r) >= 15]
+        
+        if not p_rows:
+            requests.post(WEBHOOK_URL, json={"content": f"📅 {date_str} 行情 CSV 尚未備妥。"})
+            return
+
         df_p = pd.DataFrame(p_rows[1:], columns=p_rows[0])
         
+        # 定義行情表關鍵欄位
         p_sid_col = [c for c in df_p.columns if "代號" in c][0]
         p_close_col = [c for c in df_p.columns if "收盤價" in c][0]
         p_diff_col = [c for c in df_p.columns if "漲跌價" in c][0]
         p_sign_col = [c for c in df_p.columns if "漲跌" in c and "+/-" in c][0]
 
         results = []
-        # 7. 進行分級分析
-        for _, row in df_i.sort_values(by='vol_num', ascending=False).head(100).iterrows():
-            sid, name, vol = row[sid_col].strip('=').strip('"'), row[name_col], int(row['vol_num'])
+        # 4. 分析邏輯
+        for _, row in df_i.iterrows():
+            sid = row[0].strip('=').strip('"')
+            name = row[1]
+            vol = safe_float(row[vol_col]) / 1000
+            
+            if vol <= 0: continue # 只看買超
             
             match = df_p[df_p[p_sid_col].str.contains(sid)]
             if match.empty: continue
             
             p_row = match.iloc[0]
-            try:
-                price_str = p_row[p_close_col].replace(',', '')
-                diff_str = p_row[p_diff_col].replace(',', '')
-                if not price_str or not diff_str: continue
-                
-                price = float(price_str)
-                diff = float(diff_str)
-                if '−' in p_row[p_sign_col] or '-' in p_row[p_sign_col]: diff *= -1
-                
-                change = round((diff / (price - diff)) * 100, 2)
-            except: continue
+            price = safe_float(p_row[p_close_col])
+            diff = safe_float(p_row[p_diff_col])
+            
+            if price == 0: continue
+            
+            # 判斷正負號
+            if '−' in p_row[p_sign_col] or '-' in p_row[p_sign_col]:
+                diff *= -1
+            
+            # 計算漲幅
+            prev = price - diff
+            change = round((diff / prev) * 100, 2) if prev != 0 else 0.0
 
+            # --- 川投顧三等級標準 ---
             tag = ""
-            if change >= 7.0 and vol > 0: tag = "🔥【SS 級】"
-            elif change >= 3.5 and vol > 0: tag = "💎【S 級】"
+            if change >= 7.0: tag = "🔥【SS 級】"
+            elif change >= 3.5: tag = "💎【S 級】"
             elif change >= 1.0: tag = "📈【A 級】"
             
             if tag:
-                results.append(f"{tag} **[{sid} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{vol} 張")
+                results.append(f"{tag} **[{sid} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{int(vol)} 張")
 
-        msg = f"☀️ **【川投顧：{date_str} CSV 核心分析】**\n\n" + "\n\n".join(results[:15]) if results else "📅 今日盤面無符合標的。"
-        requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": msg})
+        # 5. 排序並送出 (按漲幅排，選前 15 名)
+        if results:
+            content = f"☀️ **【川投顧：{date_str} 強勢股報告】**\n\n" + "\n\n".join(results[:15])
+        else:
+            content = f"📅 {date_str} 沒發現符合等級的標的。"
+
+        requests.post(WEBHOOK_URL, json={"username": "川投顧嘴砲量化系統", "content": content})
 
     except Exception as e:
-        requests.post(WEBHOOK_URL, json={"content": f"❌ 終極炸裂：{str(e)}"})
+        requests.post(WEBHOOK_URL, json={"content": f"❌ 系統修復失敗：{str(e)}"})
 
 if __name__ == "__main__":
     run_analysis()
