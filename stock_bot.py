@@ -8,30 +8,20 @@ def clean_sid(series):
     return series.astype(str).str.replace(r'[=" \t]', '', regex=True).str.strip()
 
 def get_market_info(date_str):
-    """嘗試獲取大盤數據，若失敗則回傳空字串，不卡死主程式"""
+    """嘗試獲取大盤概況，失敗則優雅跳過"""
     headers = {'User-Agent': 'Mozilla/5.0'}
     try:
-        # 加權指數
         p_url = f"https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date_str}&type=IND"
         p_res = requests.get(p_url, headers=headers, timeout=8)
         if "查詢無資料" in p_res.text: return ""
         
         df_m = pd.read_csv(io.StringIO(p_res.text), skiprows=1, thousands=',')
         taiex = df_m[df_m.iloc[:, 0].str.contains('發行量加權股價指數', na=False)].iloc[0]
-        idx_p, idx_diff = float(taiex.iloc[1]), pd.to_numeric(taiex.iloc[3], errors='coerce')
+        idx_p = float(taiex.iloc[1])
+        idx_diff = pd.to_numeric(taiex.iloc[3], errors='coerce')
         if '−' in str(taiex.iloc[2]) or '-' in str(taiex.iloc[2]): idx_diff *= -1
         idx_chg = round((idx_diff / (idx_p - idx_diff)) * 100, 2)
-
-        # 法人合計 (這個最容易卡住，獨立處理)
-        try:
-            f_url = f"https://www.twse.com.tw/fund/BFI82U?response=csv&dayDate={date_str}&type=day"
-            f_res = requests.get(f_url, headers=headers, timeout=8)
-            df_f = pd.read_csv(io.StringIO(f_res.text), skiprows=1, thousands=',')
-            total_buy = pd.to_numeric(df_f.iloc[-1, 3], errors='coerce') / 100000000
-            f_str = f"\n💰 **三大法人大盤合計：{'+' if total_buy>0 else ''}{round(total_buy, 2)} 億**"
-        except: f_str = ""
-
-        return f"📊 **加權指數：{idx_p} ({'+' if idx_diff>0 else ''}{idx_diff} / {'+' if idx_chg>0 else ''}{idx_chg}%)**{f_str}\n"
+        return f"📊 **加權指數：{idx_p} ({'+' if idx_diff>0 else ''}{idx_diff} / {'+' if idx_chg>0 else ''}{idx_chg}%)**\n"
     except: return ""
 
 def run_analysis():
@@ -57,32 +47,34 @@ def run_analysis():
         df_i['sid_clean'], df_p['sid_clean'] = clean_sid(df_i.iloc[:, 0]), clean_sid(df_p.iloc[:, 0])
         df = pd.merge(df_i, df_p, on='sid_clean', how='inner')
 
-        results = []
+        hot_stocks = [] # SS, S, A 級
+        x_stocks = []   # X 級起漲潛力
+
         for _, row in df.iterrows():
             try:
-                name = row.iloc[1]
-                vol = pd.to_numeric(row.iloc[18], errors='coerce') / 1000
-                price = pd.to_numeric(row['收盤價'], errors='coerce')
+                name, price = row.iloc[1], pd.to_numeric(row['收盤價'], errors='coerce')
+                vol = pd.to_numeric(row.iloc[18], errors='coerce') / 1000 # 法人買超張數
                 diff = pd.to_numeric(row['漲跌價'], errors='coerce')
                 if '−' in str(row['漲跌(+/-)']) or '-' in str(row['漲跌(+/-)']): diff *= -1
                 change = round((diff / (price - diff)) * 100, 2) if (price - diff) != 0 else 0
 
-                tag = ""
-                if vol > 0: # 法人一定要買超
-                    if change >= 7.0: tag = "🔥【SS 級】"
-                    elif change >= 3.5: tag = "💎【S 級】"
-                    elif change >= 1.0: tag = "📈【A 級】"
-                    elif -3.0 <= change <= 0: # 修正 X 級邏輯：跌幅 0~-3% 但法人逆勢買超
-                        tag = "🔍【X 級：逆勢起漲潛力】"
+                info = f"**[{row['sid_clean']} {name}]** 價格:{price} ({'+' if change>0 else ''}{change}%) 法人:{int(vol)}張"
                 
-                if tag:
-                    results.append((change, f"{tag} **[{row['sid_clean']} {name}]**\n價格：{price} ({'+' if change>0 else ''}{change}%)\n法人：{int(vol)} 張"))
+                if vol > 0: # 核心條件：法人必須是買超
+                    if change >= 7.0: hot_stocks.append((change, f"🔥【SS 級】 {info}"))
+                    elif change >= 3.5: hot_stocks.append((change, f"💎【S 級】 {info}"))
+                    elif change >= 1.0: hot_stocks.append((change, f"📈【A 級】 {info}"))
+                    elif -3.0 <= change <= 0: # X 級：小跌但法人買
+                        x_stocks.append((change, f"🔍【X 級：逆勢起漲】 {info}"))
             except: continue
 
-        results.sort(key=lambda x: x[0], reverse=True)
-        final_list = [r[1] for r in results[:25]]
+        # 排序與組合
+        hot_stocks.sort(key=lambda x: x[0], reverse=True)
+        x_stocks.sort(key=lambda x: x[0], reverse=True) # 越接近平盤的排越前面
+        
+        final_list = [s[1] for s in hot_stocks[:15]] + ["--- 潛在起漲區 ---"] + [s[1] for s in x_stocks[:10]]
 
-        content = f"☀️ **川投顧 {report_type}**\n日期：{date_str}\n{market_header}{'-'*30}\n\n" + "\n\n".join(final_list)
+        content = f"☀️ **川投顧 {report_type}**\n日期：{date_str}\n{market_header}{'='*25}\n\n" + "\n".join(final_list)
         requests.post(WEBHOOK_URL, json={"username": "川投顧量化系統", "content": content})
 
     except Exception as e:
