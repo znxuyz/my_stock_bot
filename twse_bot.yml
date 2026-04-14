@@ -1,0 +1,49 @@
+name: TWSE 戰報機器人
+
+on:
+  schedule:
+    # 盤後結算：週一至週五 16:00 台灣時間（UTC+8 → UTC 08:00）
+    - cron: "0 8 * * 1-5"
+    # 盤前複習：週二至週六 08:00 台灣時間（UTC+8 → UTC 00:00）
+    - cron: "0 0 * * 2-6"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "執行模式 (close / preview)"
+        required: false
+        default: "close"
+
+jobs:
+  send-report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15   # 防止卡死超過 15 分鐘
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: 設定 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 安裝套件
+        run: pip install requests
+
+      - name: 判定執行模式
+        id: mode
+        run: |
+          # 手動觸發時使用輸入值，否則依時間自動判定
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "RUN_MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
+          elif [ "$(date -u +%H)" = "00" ]; then
+            echo "RUN_MODE=preview" >> $GITHUB_ENV
+          else
+            echo "RUN_MODE=close" >> $GITHUB_ENV
+          fi
+
+      - name: 執行戰報腳本
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          RUN_MODE: ${{ env.RUN_MODE }}
+        run: python twse_report_bot.py
