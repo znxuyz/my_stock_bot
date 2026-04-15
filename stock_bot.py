@@ -371,35 +371,18 @@ def run_analysis():
             }, timeout=15)
             return
 
-        # T86 欄位精確對應（避免誤抓子欄）
-        # 外資 → 外資及陸資(不含外資自營商)買賣超股數
-        # 投信 → 投信買賣超股數
-        # 合計 → 三大法人買賣超股數
-        def _find_exact(df, must_in, no_in=None):
-            for c in df.columns:
-                cs = str(c)
-                if all(k in cs for k in must_in):
-                    if no_in and any(k in cs for k in no_in):
-                        continue
-                    return c
-            return None
+        # parse_t86 已用固定索引解析，欄位名稱固定為 _foreign/_trust/_total
+        col_foreign = '_foreign'
+        col_trust   = '_trust'
+        col_total   = '_total'
+        print(f"[T86] 外資非零：{(df_i['_foreign']!=0).sum()} 投信非零：{(df_i['_trust']!=0).sum()}")
 
-        col_foreign = _find_exact(df_i, ['外資及陸資', '買賣超'], ['自營商'])
-        col_trust   = _find_exact(df_i, ['投信', '買賣超'])
-        col_total   = _find_exact(df_i, ['三大法人', '買賣超'])
-        print(f"[T86] 外資={col_foreign} 投信={col_trust} 合計={col_total}")
-
-        if not col_total:
-            avail = [c for c in [col_foreign, col_trust] if c]
-            if avail:
-                df_i['_total'] = df_i[avail].apply(pd.to_numeric, errors='coerce').sum(axis=1)
-                col_total = '_total'
-            else:
-                raise ValueError(f"找不到法人欄位：{list(df_i.columns)}")
-
-        for col in [col_foreign, col_trust, col_total]:
-            if col:
-                df_i[col] = pd.to_numeric(df_i[col], errors='coerce').fillna(0)
+        # 數據驗證：外資和投信不應同時全為0
+        if (df_i['_foreign'] == 0).all() and (df_i['_trust'] == 0).all():
+            requests.post(WEBHOOK_URL, json={
+                'content': f'❌ T86 法人數據異常（外資+投信全為0），請查看 Actions log。'
+            }, timeout=15)
+            return
 
         # ── 解析 MI_INDEX ──
         price_text = r_price.text
