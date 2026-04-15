@@ -164,16 +164,16 @@ def fetch_eps(date_str):
 
         eps_dict = {}
         for item in data:
-            # 欄位名稱：Code, Name, BasEPS, Year, Season（或類似）
-            sid = str(item.get('Code', item.get('證券代號', ''))).strip()
+            # TWSE OpenAPI t163sb20 實際欄位名稱：
+            # 公司代號, 公司名稱, 年度, 季別, 基本每股盈餘（元）
+            sid = str(item.get('公司代號', item.get('Code', ''))).strip()
             if not sid:
                 continue
-            # 找 EPS 值
-            val_raw = item.get('BasEPS', item.get('每股盈餘', item.get('EPS', '')))
+            val_raw = item.get('基本每股盈餘（元）', item.get('BasEPS', item.get('每股盈餘', '')))
             val = pd.to_numeric(str(val_raw).replace(',', ''), errors='coerce')
-            # 找季別
-            year   = str(item.get('Year',   item.get('年度', ''))).strip()
-            season = str(item.get('Season', item.get('季別', ''))).strip()
+            year   = str(item.get('年度',   item.get('Year', ''))).strip()
+            season = str(item.get('季別',   item.get('Season', ''))).strip()
+            # 季別：1=Q1, 2=Q2, 3=Q3, 4=Q4
             if year and season:
                 quarter_str = f"{year}/Q{season}"
             else:
@@ -436,10 +436,24 @@ def run_analysis():
             }, timeout=15)
             return
 
-        col_foreign = find_col(df_i, '外資', '買賣超')
-        col_trust   = find_col(df_i, '投信', '買賣超')
-        col_dealer  = find_col(df_i, '自營商', '買賣超')
-        col_total   = find_col(df_i, '合計', '買賣超')
+        # T86 欄位精確對應（避免誤抓子欄）
+        # 外資 → 外資及陸資(不含外資自營商)買賣超股數
+        # 投信 → 投信買賣超股數
+        # 自營商 → 自營商買賣超股數（自行買賣+避險合計，不含括號子欄）
+        # 合計 → 三大法人買賣超股數
+        def _find_exact(df, must_in, no_in=None):
+            for c in df.columns:
+                cs = str(c)
+                if all(k in cs for k in must_in):
+                    if no_in and any(k in cs for k in no_in):
+                        continue
+                    return c
+            return None
+
+        col_foreign = _find_exact(df_i, ['外資及陸資', '買賣超'], ['自營商'])
+        col_trust   = _find_exact(df_i, ['投信', '買賣超'])
+        col_dealer  = _find_exact(df_i, ['自營商', '買賣超'], ['自行買賣', '避險'])
+        col_total   = _find_exact(df_i, ['三大法人', '買賣超'])
         print(f"[T86] 外資={col_foreign} 投信={col_trust} 自營={col_dealer} 合計={col_total}")
 
         if not col_total:
