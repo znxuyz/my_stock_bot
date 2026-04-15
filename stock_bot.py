@@ -170,27 +170,61 @@ def fetch_stock_news(count=10):
         return []
 
 # ══════════════════════════════════════════════════════════
-# T86 法人解析
+# T86 法人解析（用固定欄位索引，不依賴欄位名稱字串）
+# T86 固定欄位順序：
+#   idx 0  : 證券代號
+#   idx 1  : 證券名稱
+#   idx 4  : 外資及陸資買賣超股數  ← _foreign
+#   idx 10 : 投信買賣超股數        ← _trust
+#   idx 18 : 三大法人買賣超股數    ← _total
 # ══════════════════════════════════════════════════════════
 def parse_t86(text):
-    print(f"[T86] 前400字：\n{text[:400]}\n{'─'*40}")
+    print(f"[T86] 前300字：\n{text[:300]}\n{'─'*40}")
     lines = text.splitlines()
+
+    # 找表頭行
     header_idx = -1
     for i, line in enumerate(lines):
         if '證券代號' in line:
             header_idx = i
             break
     if header_idx == -1:
-        print("[T86] 找不到表頭，嘗試 skiprows=1")
-        df = safe_read_csv(text, 'T86-fallback', skiprows=1, min_cols=5)
-    else:
-        print(f"[T86] 表頭第 {header_idx} 行")
-        df = safe_read_csv('\n'.join(lines[header_idx:]), 'T86', min_cols=5)
+        print("[T86] 找不到表頭，發送原始內容供 debug")
+        return pd.DataFrame()
+
+    print(f"[T86] 表頭第 {header_idx} 行：{lines[header_idx][:120]}")
+    df = safe_read_csv('\n'.join(lines[header_idx:]), 'T86', min_cols=11)
     if df.empty:
         return pd.DataFrame()
+
+    # 印出全部欄位名稱
+    print(f"[T86] 共 {len(df.columns)} 欄：{list(df.columns)}")
+
+    # 過濾有效股票列
     df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
+    if df.empty:
+        print("[T86] 過濾後無有效股票列")
+        return pd.DataFrame()
+
     df['sid_clean'] = clean_sid(df.iloc[:, 0])
-    print(f"[T86] 有效股票：{len(df)} 檔，欄位：{list(df.columns[:10])}")
+    n = len(df.columns)
+
+    # 用索引取值
+    if n >= 19:
+        df['_foreign'] = pd.to_numeric(df.iloc[:, 4],  errors='coerce').fillna(0)
+        df['_trust']   = pd.to_numeric(df.iloc[:, 10], errors='coerce').fillna(0)
+        df['_total']   = pd.to_numeric(df.iloc[:, 18], errors='coerce').fillna(0)
+        print(f"[T86] 標準19欄格式，外資idx=4 投信idx=10 合計idx=18")
+    elif n >= 11:
+        df['_foreign'] = pd.to_numeric(df.iloc[:, 4],  errors='coerce').fillna(0)
+        df['_trust']   = pd.to_numeric(df.iloc[:, 10], errors='coerce').fillna(0)
+        df['_total']   = df['_foreign'] + df['_trust']
+        print(f"[T86] 備援{n}欄格式，外資idx=4 投信idx=10")
+    else:
+        print(f"[T86] 欄位數不足({n})，無法解析")
+        return pd.DataFrame()
+
+    print(f"[T86] 有效股票：{len(df)} 檔，外資非零：{(df['_foreign']!=0).sum()}，投信非零：{(df['_trust']!=0).sum()}")
     return df
 
 # ══════════════════════════════════════════════════════════
@@ -372,6 +406,18 @@ def run_analysis():
             return
 
         # parse_t86 已用固定索引解析，欄位名稱固定為 _foreign/_trust/_total
+        # 先確認欄位存在
+        for required_col in ['_foreign', '_trust', '_total']:
+            if required_col not in df_i.columns:
+                requests.post(WEBHOOK_URL, json={
+                    'content': (
+                        f'❌ T86 欄位 {required_col} 不存在（{date_str}）\n'
+                        f'現有欄位：{list(df_i.columns)}\n'
+                        f'T86前300字：\n{r_inst.text[:300]}'
+                    )
+                }, timeout=15)
+                return
+
         col_foreign = '_foreign'
         col_trust   = '_trust'
         col_total   = '_total'
