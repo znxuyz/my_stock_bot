@@ -2,15 +2,13 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    # 盤後：台灣 16:00 觸發（UTC 08:00），就算延遲 1hr 也是 17:00 後資料已出
-    - cron: '0 8 * * 1-5'
-    # 盤前：台灣 06:00 觸發（UTC 22:00 前一天）
-    - cron: '0 22 * * 0-4'
+    - cron: '0 8 * * 1-5'    # 台灣 16:00（盤後）
+    - cron: '0 22 * * 0-4'   # 台灣 06:00（盤前）
 
   workflow_dispatch:
     inputs:
       mode:
-        description: '執行模式 (auto / close=強制盤後 / preview=強制盤前)'
+        description: '執行模式 (auto / close / preview)'
         required: false
         default: 'auto'
 
@@ -36,12 +34,32 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "RUN_MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
           else
-            # cron 觸發一律用 auto，讓腳本依台灣時間自己判斷
             echo "RUN_MODE=auto" >> $GITHUB_ENV
           fi
+
+      # 今日日期（台灣時間，用於快取 key）
+      - name: Set cache date
+        run: |
+          TZ=Asia/Taipei date +%Y%m > /tmp/cache_month.txt
+          echo "CACHE_MONTH=$(cat /tmp/cache_month.txt)" >> $GITHUB_ENV
+
+      # 讀取今天的歷史K棒快取（若存在）
+      - name: Restore history cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/stock_cache_${{ env.CACHE_MONTH }}
+          key: stock-history-${{ env.CACHE_MONTH }}
 
       - name: Run bot
         env:
           DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
           RUN_MODE: ${{ env.RUN_MODE }}
         run: python stock_bot.py
+
+      # 執行後儲存快取（供同月份下次執行使用）
+      - name: Save history cache
+        uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: /tmp/stock_cache_${{ env.CACHE_MONTH }}
+          key: stock-history-${{ env.CACHE_MONTH }}
