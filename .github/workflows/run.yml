@@ -2,20 +2,17 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    # 盤後結算：提早到台灣 16:00 觸發（UTC 08:00）
-    # 就算 GitHub 延遲 1 小時，最晚也是台灣 17:00 收到
+    # 盤後：台灣 16:00 觸發（UTC 08:00），就算延遲 1hr 也是 17:00 後資料已出
     - cron: '0 8 * * 1-5'
-
-    # 盤前複習：提早到台灣 06:00 觸發（UTC 22:00，前一天）
-    # 就算延遲 1 小時，最晚也是台灣 07:00 收到
+    # 盤前：台灣 06:00 觸發（UTC 22:00 前一天）
     - cron: '0 22 * * 0-4'
 
   workflow_dispatch:
     inputs:
       mode:
-        description: '執行模式 (close=盤後 / preview=盤前)'
+        description: '執行模式 (auto / close=強制盤後 / preview=強制盤前)'
         required: false
-        default: 'close'
+        default: 'auto'
 
 jobs:
   run_bot:
@@ -39,14 +36,8 @@ jobs:
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "RUN_MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
           else
-            # UTC 22:00 = 台灣隔日 06:00 → 盤前複習
-            # UTC 08:00 = 台灣 16:00       → 盤後結算
-            HOUR=$(date -u +%H)
-            if [ "$HOUR" = "22" ]; then
-              echo "RUN_MODE=preview" >> $GITHUB_ENV
-            else
-              echo "RUN_MODE=close" >> $GITHUB_ENV
-            fi
+            # cron 觸發一律用 auto，讓腳本依台灣時間自己判斷
+            echo "RUN_MODE=auto" >> $GITHUB_ENV
           fi
 
       - name: Run bot
