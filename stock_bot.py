@@ -25,8 +25,13 @@ EMA_FALLBACK_MIN = 60   # 備援模式最少需要幾筆資料
 GRADE_SS   =  7.0
 GRADE_S    =  3.5
 GRADE_A    =  1.0
-GRADE_X_LO = -3.0
+GRADE_X_LO = -1.5   # 縮小 X 級跌幅範圍（原 -3.0），讓 X 級更精準
 GRADE_X_HI =  0.0
+
+# 雙買超門檻：外資和投信各自的最低要求
+MIN_FOREIGN_SHARE      = 10000   # 外資至少 10,000 股
+MIN_TRUST_SHARE        = 10000   # 投信至少 10,000 股
+MIN_INST_SHARE_SINGLE  = 100000  # 只有單方買超時，合計需達 100,000 股才入選
 
 DATA_READY_HOUR = 17   # 台灣時間幾點後才有當天資料
 
@@ -494,8 +499,10 @@ def run_analysis():
                 trust   = float(inst_row[col_trust].values[0])   if col_trust   else 0.0
                 total   = foreign + trust
 
-                # 3. 法人買超下限
-                if total < MIN_INST_SHARE:
+                # 3. 法人買超下限（雙買超優先，單方買超門檻提高）
+                both_buy   = foreign >= MIN_FOREIGN_SHARE and trust >= MIN_TRUST_SHARE
+                single_buy = total >= MIN_INST_SHARE_SINGLE
+                if not (both_buy or single_buy):
                     continue
 
                 candidates.append({
