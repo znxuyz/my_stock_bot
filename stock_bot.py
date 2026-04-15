@@ -374,7 +374,6 @@ def run_analysis():
         # T86 欄位精確對應（避免誤抓子欄）
         # 外資 → 外資及陸資(不含外資自營商)買賣超股數
         # 投信 → 投信買賣超股數
-        # 自營商 → 自營商買賣超股數（自行買賣+避險合計，不含括號子欄）
         # 合計 → 三大法人買賣超股數
         def _find_exact(df, must_in, no_in=None):
             for c in df.columns:
@@ -387,19 +386,18 @@ def run_analysis():
 
         col_foreign = _find_exact(df_i, ['外資及陸資', '買賣超'], ['自營商'])
         col_trust   = _find_exact(df_i, ['投信', '買賣超'])
-        col_dealer  = _find_exact(df_i, ['自營商', '買賣超'], ['自行買賣', '避險'])
         col_total   = _find_exact(df_i, ['三大法人', '買賣超'])
-        print(f"[T86] 外資={col_foreign} 投信={col_trust} 自營={col_dealer} 合計={col_total}")
+        print(f"[T86] 外資={col_foreign} 投信={col_trust} 合計={col_total}")
 
         if not col_total:
-            avail = [c for c in [col_foreign, col_trust, col_dealer] if c]
+            avail = [c for c in [col_foreign, col_trust] if c]
             if avail:
                 df_i['_total'] = df_i[avail].apply(pd.to_numeric, errors='coerce').sum(axis=1)
                 col_total = '_total'
             else:
                 raise ValueError(f"找不到法人欄位：{list(df_i.columns)}")
 
-        for col in [col_foreign, col_trust, col_dealer, col_total]:
+        for col in [col_foreign, col_trust, col_total]:
             if col:
                 df_i[col] = pd.to_numeric(df_i[col], errors='coerce').fillna(0)
 
@@ -465,8 +463,7 @@ def run_analysis():
 
                 foreign = float(inst_row[col_foreign].values[0]) if col_foreign else 0.0
                 trust   = float(inst_row[col_trust].values[0])   if col_trust   else 0.0
-                dealer  = float(inst_row[col_dealer].values[0])  if col_dealer  else 0.0
-                total   = foreign + trust + dealer
+                total   = foreign + trust
 
                 # 3. 法人買超下限
                 if total < MIN_INST_SHARE:
@@ -476,7 +473,7 @@ def run_analysis():
                     'sid': sid, 'name': name,
                     'price': price, 'change': change,
                     'foreign': int(foreign), 'trust': int(trust),
-                    'dealer':  int(dealer),  'total': int(total),
+                    'total': int(total),
                 })
             except:
                 continue
@@ -550,7 +547,7 @@ def run_analysis():
                 f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}\n"
                 f"🔹收盤價格:{e['price']}\n"
                 f"🔹今日漲幅{sign}{e['change']}%    量比:{e.get('vol_ratio', 0):.1f}x{ema_tag}\n"
-                f"🔹外資:{fmt_share(e['foreign'])}股　投信:{fmt_share(e['trust'])}股　自營商:{fmt_share(e['dealer'])}股"
+                f"🔹外資:{fmt_share(e['foreign'])}股　投信:{fmt_share(e['trust'])}股"
             )
 
         if market:
