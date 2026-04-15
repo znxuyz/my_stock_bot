@@ -22,6 +22,9 @@ GRADE_A    =  1.0
 GRADE_X_LO = -3.0
 GRADE_X_HI =  0.0
 
+# 幾點後才抓當天資料（24小時制，台灣時間）
+DATA_READY_HOUR = 17   # 下午5點後才有當天完整盤後資料
+
 # ══════════════════════════════════════════════════════════
 # 工具函式
 # ══════════════════════════════════════════════════════════
@@ -43,9 +46,7 @@ def safe_get(url, params=None, timeout=20, retries=3, wait=15):
     return None
 
 def safe_read_csv(text, label, skiprows=0, thousands=',', min_cols=2):
-    """
-    安全解析 CSV，失敗時印出前 500 字供 debug，回傳空 DataFrame。
-    """
+    """安全解析 CSV，失敗時印出前 500 字，回傳空 DataFrame。"""
     try:
         df = pd.read_csv(
             io.StringIO(text),
@@ -72,17 +73,44 @@ def fmt_share(n):
     return f"{sign}{int(n):,}"
 
 # ══════════════════════════════════════════════════════════
-# 交易日判定
+# 交易日判定（智慧版）
 # ══════════════════════════════════════════════════════════
 def get_target_date(run_mode):
-    now  = datetime.utcnow() + timedelta(hours=8)
+    """
+    run_mode = 'auto'    → 依台灣時間自動判斷（預設）
+                           17:00 前 → 抓前一個交易日
+                           17:00 後 → 抓當天（盤後資料已出）
+    run_mode = 'close'   → 強制抓當天（盤後）
+    run_mode = 'preview' → 強制抓前一個交易日（盤前複習）
+
+    週末自動回溯至週五。
+    """
+    now  = datetime.utcnow() + timedelta(hours=8)   # 轉台灣時間
     base = now.date()
+    hour = now.hour
+
     if run_mode == 'preview':
+        # 強制前一交易日
         delta = 3 if base.weekday() == 0 else 1
         base -= timedelta(days=delta)
-    else:
+
+    elif run_mode == 'close':
+        # 強制當天，週末回溯週五
         if   base.weekday() == 5: base -= timedelta(days=1)
         elif base.weekday() == 6: base -= timedelta(days=2)
+
+    else:
+        # auto 模式：17:00 前抓前一交易日，17:00 後抓當天
+        if hour < DATA_READY_HOUR:
+            # 資料未出，回溯前一交易日（跳週末）
+            delta = 3 if base.weekday() == 0 else (
+                    2 if base.weekday() == 6 else 1)
+            base -= timedelta(days=delta)
+        else:
+            # 資料已出，抓當天（週末回溯週五）
+            if   base.weekday() == 5: base -= timedelta(days=1)
+            elif base.weekday() == 6: base -= timedelta(days=2)
+
     return base.strftime('%Y%m%d')
 
 # ══════════════════════════════════════════════════════════
@@ -102,7 +130,6 @@ def get_market_info(date_str):
             return None
         row = df[df.iloc[:, 0].astype(str).str.contains('發行量加權股價指數', na=False)]
         if row.empty:
-            print(f"[大盤] 找不到加權指數列，欄位：{list(df.columns)}")
             return None
         row = row.iloc[0]
         idx_p    = float(str(row.iloc[1]).replace(',', ''))
@@ -118,6 +145,43 @@ def get_market_info(date_str):
         return None
 
 # ══════════════════════════════════════════════════════════
+# T86 法人解析（獨立函式，方便 debug）
+# ══════════════════════════════════════════════════════════
+def parse_t86(text):
+    """
+    解析 T86 CSV，回傳 DataFrame。
+    證交所 T86 格式：前幾列是說明文字，表頭在「證券代號」那一列。
+    """
+    print(f"[T86] 原始回應前 400 字：\n{text[:400]}\n{'─'*40}")
+
+    # 策略1：找含「證券代號」的表頭行
+    lines = text.splitlines()
+    header_idx = -1
+    for i, line in enumerate(lines):
+        if '證券代號' in line:
+            header_idx = i
+            break
+
+    if header_idx == -1:
+        print("[T86] 找不到含「證券代號」的表頭行")
+        # 策略2：直接用 skiprows=1 嘗試
+        df = safe_read_csv(text, 'T86-fallback', skiprows=1, min_cols=5)
+        if df.empty:
+            return pd.DataFrame()
+    else:
+        print(f"[T86] 表頭在第 {header_idx} 行：{lines[header_idx][:100]}")
+        clean_text = '\n'.join(lines[header_idx:])
+        df = safe_read_csv(clean_text, 'T86-header', min_cols=5)
+        if df.empty:
+            return pd.DataFrame()
+
+    # 過濾出股票代號列（4~6位數字或英數）
+    df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
+    print(f"[T86] 有效股票列數：{len(df)}")
+    print(f"[T86] 欄位（前12個）：{list(df.columns[:12])}")
+    return df
+
+# ══════════════════════════════════════════════════════════
 # 歷史 K 棒 → EMA + 量比
 # ══════════════════════════════════════════════════════════
 def fetch_monthly_ohlcv(sid, yyyymm):
@@ -130,24 +194,20 @@ def fetch_monthly_ohlcv(sid, yyyymm):
         return pd.DataFrame()
     try:
         text = r.text
-        # 找表頭（民國年日期格式 或 "日期" 關鍵字）
         idx = text.find('"日期"')
         if idx == -1:
-            # 備援：找民國年格式的第一列
             for yr_prefix in ['114/', '113/', '112/']:
                 idx = text.find(yr_prefix)
                 if idx != -1:
                     idx = text.rfind('\n', 0, idx) + 1
                     break
         if idx == -1:
-            print(f"[月K] {sid}/{yyyymm} 找不到資料起始點，前300字：\n{text[:300]}")
             return pd.DataFrame()
 
         df = safe_read_csv(text[idx:], f'STOCK_DAY-{sid}', min_cols=7)
         if df.empty:
             return pd.DataFrame()
 
-        # 過濾出民國年格式的列
         df = df[df.iloc[:, 0].astype(str).str.match(r'^\d{3}/\d{2}/\d{2}$', na=False)].copy()
         if df.empty:
             return pd.DataFrame()
@@ -207,10 +267,20 @@ def run_analysis():
         print('[錯誤] 未設定 DISCORD_WEBHOOK 環境變數')
         return
 
-    run_mode    = os.environ.get('RUN_MODE', 'close').strip().lower()
-    date_str    = get_target_date(run_mode)
-    report_type = '盤前複習' if run_mode == 'preview' else '盤後結算'
-    print(f"[執行] 模式={run_mode}，日期={date_str}")
+    # RUN_MODE 優先序：環境變數 > auto
+    run_mode = os.environ.get('RUN_MODE', 'auto').strip().lower()
+    date_str = get_target_date(run_mode)
+
+    # 判斷顯示標題
+    now_tw = datetime.utcnow() + timedelta(hours=8)
+    if run_mode == 'preview':
+        report_type = '盤前複習'
+    elif run_mode == 'close':
+        report_type = '盤後結算'
+    else:
+        report_type = '盤後結算' if now_tw.hour >= DATA_READY_HOUR else '盤前複習'
+
+    print(f"[執行] 模式={run_mode}，日期={date_str}，標題={report_type}，台灣時間={now_tw.strftime('%H:%M')}")
 
     market = get_market_info(date_str)
 
@@ -236,14 +306,12 @@ def run_analysis():
 
     try:
         # ── 解析 T86 ──
-        print(f"[T86] 回應前300字：\n{r_inst.text[:300]}\n")
-        df_i = safe_read_csv(r_inst.text, 'T86', skiprows=1)
+        df_i = parse_t86(r_inst.text)
         if df_i.empty:
-            requests.post(WEBHOOK_URL, json={'content': f'❌ T86 解析失敗（{date_str}），請查看 Actions log。'}, timeout=15)
+            requests.post(WEBHOOK_URL, json={
+                'content': f'❌ T86 解析失敗（{date_str}）\n前300字：\n{r_inst.text[:300]}'
+            }, timeout=15)
             return
-
-        df_i = df_i[df_i.iloc[:, 0].astype(str).str.contains(r'^[0-9A-Z]', na=False)].copy()
-        print(f"[T86] 有效列數：{len(df_i)}，欄位：{list(df_i.columns[:8])}")
 
         col_foreign = find_col(df_i, '外資', '買賣超')
         col_trust   = find_col(df_i, '投信', '買賣超')
@@ -257,7 +325,7 @@ def run_analysis():
                 df_i['_total'] = df_i[avail].apply(pd.to_numeric, errors='coerce').sum(axis=1)
                 col_total = '_total'
             else:
-                raise ValueError(f"找不到任何法人欄位，現有：{list(df_i.columns)}")
+                raise ValueError(f"找不到任何法人買賣超欄位，現有：{list(df_i.columns)}")
 
         for col in [col_foreign, col_trust, col_dealer, col_total]:
             if col:
@@ -266,7 +334,7 @@ def run_analysis():
         df_i['sid_clean'] = clean_sid(df_i.iloc[:, 0])
 
         # ── 解析 MI_INDEX ──
-        print(f"[MI_INDEX] 回應前300字：\n{r_price.text[:300]}\n")
+        print(f"[MI_INDEX] 回應前 300 字：\n{r_price.text[:300]}\n{'─'*40}")
         price_text = r_price.text
         start_idx  = price_text.find('"證券代號"')
         if start_idx == -1:
@@ -298,7 +366,7 @@ def run_analysis():
         print(f"[欄位] 收盤={col_close} 漲跌差={col_diff} 符號={col_sign}")
 
         if not all([col_close, col_diff]):
-            raise ValueError(f"找不到收盤/漲跌欄，現有欄位：{list(df.columns)}")
+            raise ValueError(f"找不到收盤/漲跌欄，現有：{list(df.columns)}")
 
         # ── 第一輪：基本條件過濾 ──
         candidates = []
@@ -365,7 +433,7 @@ def run_analysis():
                 entry['vol_ratio'] = vol_ratio
                 change = entry['change']
 
-                if   change >= GRADE_SS:                   ss_list.append(entry)
+                if   change >= GRADE_SS:                  ss_list.append(entry)
                 elif change >= GRADE_S:                    s_list.append(entry)
                 elif change >= GRADE_A:                    a_list.append(entry)
                 elif GRADE_X_LO <= change < GRADE_X_HI:   x_list.append(entry)
@@ -418,7 +486,6 @@ def run_analysis():
 
         full_message = header + '\n\n' + '\n\n'.join(sections)
 
-        # 分段發送
         chunks, buf = [], ''
         for line in full_message.splitlines(keepends=True):
             if len(buf) + len(line) > 1900 and buf:
@@ -439,8 +506,7 @@ def run_analysis():
 
     except Exception as e:
         import traceback
-        tb = traceback.format_exc()
-        print(f"[主程式錯誤]\n{tb}")
+        print(f"[主程式錯誤]\n{traceback.format_exc()}")
         requests.post(WEBHOOK_URL, json={'content': f'❌ 系統錯誤：{e}'}, timeout=15)
 
 if __name__ == '__main__':
