@@ -139,109 +139,6 @@ def get_market_info(date_str):
         return None
 
 # ══════════════════════════════════════════════════════════
-# ══════════════════════════════════════════════════════════
-# EPS（TWSE OpenAPI，最新單季，全市場一次搞定）
-# ══════════════════════════════════════════════════════════
-def fetch_eps(date_str):
-    """
-    來源：openapi.twse.com.tw/v1/exchangeReport/t163sb20
-    一次 GET 取得全市場最新季 EPS（JSON），不需逐股查詢。
-    回傳 {sid: 'X.XX（113/Q4）'} 字典。
-    """
-    r = safe_get(
-        'https://openapi.twse.com.tw/v1/exchangeReport/t163sb20',
-        timeout=20, retries=2, wait=10
-    )
-    if r is None:
-        print("[EPS] openAPI 請求失敗，嘗試備援 BWIBBU_d")
-        return _fetch_eps_fallback(date_str)
-
-    try:
-        data = r.json()
-        if not data:
-            print("[EPS] openAPI 回傳空資料")
-            return _fetch_eps_fallback(date_str)
-
-        eps_dict = {}
-        for item in data:
-            # TWSE OpenAPI t163sb20 實際欄位名稱：
-            # 公司代號, 公司名稱, 年度, 季別, 基本每股盈餘（元）
-            sid = str(item.get('公司代號', item.get('Code', ''))).strip()
-            if not sid:
-                continue
-            val_raw = item.get('基本每股盈餘（元）', item.get('BasEPS', item.get('每股盈餘', '')))
-            val = pd.to_numeric(str(val_raw).replace(',', ''), errors='coerce')
-            year   = str(item.get('年度',   item.get('Year', ''))).strip()
-            season = str(item.get('季別',   item.get('Season', ''))).strip()
-            # 季別：1=Q1, 2=Q2, 3=Q3, 4=Q4
-            if year and season:
-                quarter_str = f"{year}/Q{season}"
-            else:
-                quarter_str = ''
-
-            if pd.isna(val):
-                eps_dict[sid] = 'N/A'
-            elif quarter_str:
-                eps_dict[sid] = f"{val:.2f}（{quarter_str}）"
-            else:
-                eps_dict[sid] = f"{val:.2f}"
-
-        print(f"[EPS] openAPI 成功，取得 {len(eps_dict)} 檔")
-        # 印出第一筆確認格式
-        if eps_dict:
-            sample = list(eps_dict.items())[:1]
-            print(f"[EPS] 範例：{sample}")
-        return eps_dict
-
-    except Exception as e:
-        print(f"[EPS] openAPI 解析失敗：{e}，嘗試備援")
-        return _fetch_eps_fallback(date_str)
-
-
-def _fetch_eps_fallback(date_str):
-    """
-    備援：從 BWIBBU_d 抓（僅有配息股有值，其餘 N/A）。
-    """
-    r = safe_get(
-        'https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d',
-        params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
-        timeout=20, retries=2, wait=10
-    )
-    if r is None or '查詢無資料' in r.text:
-        return {}
-    try:
-        text = r.text
-        idx = text.find('"證券代號"')
-        if idx == -1:
-            idx = text.find('證券代號')
-        if idx == -1:
-            return {}
-        idx = text.rfind('\n', 0, idx) + 1
-        df = safe_read_csv(text[idx:], 'BWIBBU_d-fallback', min_cols=5)
-        if df.empty:
-            return {}
-        df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
-        df['sid_clean'] = clean_sid(df.iloc[:, 0])
-        col_eps     = find_col(df, '每股盈餘')
-        col_quarter = find_col(df, '財報年')
-        if col_eps is None:
-            return {}
-        eps_dict = {}
-        for _, row in df.iterrows():
-            sid = row['sid_clean']
-            val = pd.to_numeric(str(row[col_eps]).replace(',', ''), errors='coerce')
-            if pd.isna(val):
-                eps_dict[sid] = 'N/A'
-            else:
-                q = str(row[col_quarter]).strip() if col_quarter else ''
-                eps_dict[sid] = f"{val:.2f}（{q}）" if q else f"{val:.2f}"
-        print(f"[EPS備援] 取得 {len(eps_dict)} 檔")
-        return eps_dict
-    except Exception as e:
-        print(f"[EPS備援] 失敗：{e}")
-        return {}
-
-# ══════════════════════════════════════════════════════════
 # 股市趨勢新聞（Google News RSS，台股相關）
 # ══════════════════════════════════════════════════════════
 def fetch_stock_news(count=10):
@@ -303,7 +200,7 @@ def fetch_stock_day_fast(sid, yyyymm):
     r = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
         params={'response': 'csv', 'date': yyyymm + '01', 'stockNo': sid},
-        timeout=10, retries=1, wait=3
+        timeout=12, retries=2, wait=5
     )
     if r is None or '查詢無資料' in r.text:
         return pd.DataFrame()
@@ -339,15 +236,54 @@ def fetch_stock_day_fast(sid, yyyymm):
         return pd.DataFrame()
 
 def build_history_fast(sid, months):
+    """
+    逐月抓歷史K棒，並快取到磁碟（同一天多次執行直接讀快取，確保結果一致）。
+    快取路徑：/tmp/stock_cache_{date}/{sid}.json
+    """
+    import json, os
+
+    # 快取目錄以月份清單第一個月（=最新月）命名，確保每天獨立
+    cache_dir = f"/tmp/stock_cache_{months[0]}"
+    os.makedirs(cache_dir, exist_ok=True)
+    cache_file = f"{cache_dir}/{sid}.json"
+
+    # 有快取就直接讀，跳過 API 請求
+    if os.path.exists(cache_file):
+        try:
+            with open(cache_file) as f:
+                records = json.load(f)
+            if records:
+                df = pd.DataFrame(records)
+                df['date'] = pd.to_datetime(df['date']).dt.date
+                return df
+        except:
+            pass  # 快取損壞就重新抓
+
     frames = []
     for yyyymm in months:
         df_m = fetch_stock_day_fast(sid, yyyymm)
+        if df_m.empty:
+            time.sleep(1)
+            df_m = fetch_stock_day_fast(sid, yyyymm)
         if not df_m.empty:
             frames.append(df_m)
         time.sleep(0.08)
+
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
+
+    df_all = pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
+
+    # 寫入快取
+    try:
+        records = df_all.copy()
+        records['date'] = records['date'].astype(str)
+        with open(cache_file, 'w') as f:
+            json.dump(records.to_dict('records'), f)
+    except:
+        pass
+
+    return df_all
 
 def calc_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
@@ -405,9 +341,8 @@ def run_analysis():
     print(f"[執行] 模式={run_mode}，日期={date_str}，台灣時間={now_tw.strftime('%H:%M')}")
     t_start = time.time()
 
-    # ── 平行抓取大盤、T86、MI_INDEX、EPS ──
+    # ── 平行抓取大盤、T86、MI_INDEX ──
     market  = get_market_info(date_str)
-    eps_map = fetch_eps(date_str)   # {sid: eps_str}
 
     r_inst = safe_get(
         'https://www.twse.com.tw/rwd/zh/fund/T86',
@@ -542,7 +477,6 @@ def run_analysis():
                     'price': price, 'change': change,
                     'foreign': int(foreign), 'trust': int(trust),
                     'dealer':  int(dealer),  'total': int(total),
-                    'eps': eps_map.get(sid, 'N/A'),
                 })
             except:
                 continue
@@ -616,7 +550,6 @@ def run_analysis():
                 f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}\n"
                 f"🔹收盤價格:{e['price']}\n"
                 f"🔹今日漲幅{sign}{e['change']}%    量比:{e.get('vol_ratio', 0):.1f}x{ema_tag}\n"
-                f"🔹EPS（單季）:{e['eps']}\n"
                 f"🔹外資:{fmt_share(e['foreign'])}股　投信:{fmt_share(e['trust'])}股　自營商:{fmt_share(e['dealer'])}股"
             )
 
