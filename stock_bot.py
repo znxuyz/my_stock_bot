@@ -1,7 +1,6 @@
 import os, requests, io, time
 import pandas as pd
 from datetime import datetime, timedelta
-from collections import defaultdict
 
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
 HEADERS     = {'User-Agent': 'Mozilla/5.0'}
@@ -9,13 +8,19 @@ HEADERS     = {'User-Agent': 'Mozilla/5.0'}
 # ══════════════════════════════════════════════════════════
 # 篩選參數 ── 只改這裡就能調整條件
 # ══════════════════════════════════════════════════════════
-MIN_PRICE        = 10      # 收盤價下限（元）
-MIN_INST_SHARE   = 50000   # 法人合計買超最低股數（50張 = 50,000股）
-VOLUME_RATIO_MIN = 1.5     # 當日量 ÷ 近5日均量
+MIN_PRICE        = 10      # 1. 收盤價下限（元）
+# 2. 漲跌幅區間：漲幅 >= GRADE_A 或 跌幅 GRADE_X_LO~GRADE_X_HI（程式內判斷）
+MIN_INST_SHARE   = 50000   # 3. 法人合計買超最低股數（50張 = 50,000股）
+MAX_CANDIDATES   = 50      # 4. 候選數量保護上限（取法人買超最多的前N名）
+VOLUME_RATIO_MIN = 1.5     # 5. 量比：當日量 ÷ 近5日均量
+# 6. EMA 多頭排列（程式內判斷，含備援邏輯）
 
-EMA_SHORT = 20
-EMA_MID   = 60
-EMA_LONG  = 120
+EMA_SHORT  = 10
+EMA_MID    = 20
+EMA_LONG1  = 60    # 主要：20EMA > 60EMA > 120EMA
+EMA_LONG2  = 120
+# 備援：資料不足120筆時改用 10EMA > 20EMA > 60EMA
+EMA_FALLBACK_MIN = 60   # 備援模式最少需要幾筆資料
 
 GRADE_SS   =  7.0
 GRADE_S    =  3.5
@@ -52,7 +57,7 @@ def safe_read_csv(text, label, skiprows=0, thousands=',', min_cols=2):
             thousands=thousands, on_bad_lines='skip'
         )
         if df.shape[1] < min_cols:
-            print(f"[{label}] 欄位數不足({df.shape[1]})，前400字：\n{text[:400]}")
+            print(f"[{label}] 欄位不足({df.shape[1]})，前400字：\n{text[:400]}")
             return pd.DataFrame()
         return df
     except Exception as e:
@@ -95,10 +100,8 @@ def get_target_date(run_mode):
     return base.strftime('%Y%m%d')
 
 def prev_months(date_str, n=7):
-    """回傳從 date_str 往前 n 個月的 YYYYMM 清單（含當月）。"""
     target = datetime.strptime(date_str, '%Y%m%d')
-    months = []
-    d = target.replace(day=1)
+    months, d = [], target.replace(day=1)
     for _ in range(n):
         months.append(d.strftime('%Y%m'))
         d = (d - timedelta(days=1)).replace(day=1)
@@ -136,6 +139,72 @@ def get_market_info(date_str):
         return None
 
 # ══════════════════════════════════════════════════════════
+# EPS（BWIBBU_d，最新單季）
+# ══════════════════════════════════════════════════════════
+def fetch_eps(date_str):
+    """
+    抓取 BWIBBU_d 本益比/EPS 表，回傳 {sid: eps_str} 字典。
+    欄位「每股盈餘」= 最新一季 EPS，
+    欄位「財報年/季」= 該季別（例如 113/Q3），一併附在輸出中。
+    """
+    r = safe_get(
+        'https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d',
+        params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
+        timeout=20, retries=2, wait=10
+    )
+    if r is None or '查詢無資料' in r.text:
+        print("[EPS] 查無資料，跳過")
+        return {}
+
+    try:
+        text = r.text
+        idx = text.find('"證券代號"')
+        if idx == -1:
+            idx = text.find('證券代號')
+        if idx == -1:
+            print(f"[EPS] 找不到表頭，前300字：\n{text[:300]}")
+            return {}
+        idx = text.rfind('\n', 0, idx) + 1
+
+        df = safe_read_csv(text[idx:], 'BWIBBU_d', min_cols=5)
+        if df.empty:
+            return {}
+
+        df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
+        df['sid_clean'] = clean_sid(df.iloc[:, 0])
+
+        # 欄位：證券代號, 證券名稱, 殖利率(%), 股利年度, 本益比, 股價淨值比, 財報年/季, 每股盈餘
+        col_eps     = find_col(df, '每股盈餘')
+        col_quarter = find_col(df, '財報年')   # 「財報年/季」欄
+
+        if col_eps is None:
+            print(f"[EPS] 找不到「每股盈餘」欄，現有欄位：{list(df.columns)}")
+            return {}
+
+        print(f"[EPS] EPS欄={col_eps}  季別欄={col_quarter}")
+
+        eps_dict = {}
+        for _, row in df.iterrows():
+            sid = row['sid_clean']
+            val = pd.to_numeric(str(row[col_eps]).replace(',', ''), errors='coerce')
+            if pd.isna(val):
+                eps_dict[sid] = 'N/A'
+                continue
+            # 附上季別，例如：3.52（113/Q3）
+            if col_quarter:
+                quarter = str(row[col_quarter]).strip().replace(' ', '')
+                eps_dict[sid] = f"{val:.2f}（{quarter}）"
+            else:
+                eps_dict[sid] = f"{val:.2f}"
+
+        print(f"[EPS] 成功取得 {len(eps_dict)} 檔")
+        return eps_dict
+
+    except Exception as e:
+        print(f"[EPS] 解析失敗：{e}")
+        return {}
+
+# ══════════════════════════════════════════════════════════
 # T86 法人解析
 # ══════════════════════════════════════════════════════════
 def parse_t86(text):
@@ -160,73 +229,13 @@ def parse_t86(text):
     return df
 
 # ══════════════════════════════════════════════════════════
-# ★ 核心優化：STOCK_DAY_ALL 批次抓取全市場日K
-#   一次請求 = 當月所有股票，7個月只需 7 次請求
-#   取代原本「每股 × 7個月」= 420+ 次請求
+# 歷史 K 棒（單股單月，快速模式）
 # ══════════════════════════════════════════════════════════
-def fetch_all_stocks_month(yyyymm):
-    """
-    抓取當月全市場每日收盤與成交量。
-    回傳 dict：{sid: [(date, close, volume), ...]}
-    """
-    r = safe_get(
-        'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY_ALL',
-        params={'response': 'csv', 'date': yyyymm + '01'},
-        timeout=30, retries=2, wait=10
-    )
-    if r is None or '查詢無資料' in r.text:
-        return {}
-
-    try:
-        text = r.text
-        # 找表頭
-        idx = text.find('"證券代號"')
-        if idx == -1:
-            idx = text.find('證券代號')
-        if idx == -1:
-            print(f"[STOCK_DAY_ALL] {yyyymm} 找不到表頭，前300字：\n{text[:300]}")
-            return {}
-        # 往前找到行首
-        idx = text.rfind('\n', 0, idx) + 1
-
-        df = safe_read_csv(text[idx:], f'STOCK_DAY_ALL-{yyyymm}', min_cols=5)
-        if df.empty:
-            return {}
-
-        # 欄位：證券代號, 證券名稱, 成交股數, 成交金額, 開盤價, 最高價, 最低價, 收盤價, 漲跌價差, 本益比
-        # STOCK_DAY_ALL 是月彙總（每股一列），不含每日資料
-        # 改用單月日K：STOCK_DAY 但加上 date 欄位
-        # → 實際上 STOCK_DAY_ALL 只有月彙總，無法算 EMA，需要改策略
-        print(f"[STOCK_DAY_ALL] {yyyymm} 欄位：{list(df.columns[:8])}")
-        return df
-
-    except Exception as e:
-        print(f"[STOCK_DAY_ALL] {yyyymm} 解析失敗：{e}")
-        return pd.DataFrame()
-
-
-def fetch_month_daily(yyyymm):
-    """
-    抓取單月全市場「每日」行情彙總（MI_INDEX 日資料）。
-    回傳 DataFrame：index=date，columns=sid，values=close
-    另外回傳 volume_df：index=date，columns=sid，values=volume
-    """
-    # TWSE 沒有單一API能一次給全市場每日K棒
-    # 最快方法：用 STOCK_DAY 逐股抓，但這就是慢的原因
-    # ─ 實際可行的批次方案 ─
-    # 用 MI_INDEX type=ALLBUT0999 只給當日收盤，不含歷史
-    # 真正的歷史批次只能用 STOCK_DAY 逐股，或用第三方資料源
-    # 結論：在 TWSE 限制下，EMA 計算無法避免逐股請求
-    # → 改為：限制候選股數量上限，並大幅縮短 sleep 時間
-    pass
-
-
 def fetch_stock_day_fast(sid, yyyymm):
-    """單股單月日K，timeout 縮短、sleep 縮短。"""
     r = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
         params={'response': 'csv', 'date': yyyymm + '01', 'stockNo': sid},
-        timeout=10, retries=1, wait=3   # 快速模式：1次重試，失敗直接跳過
+        timeout=10, retries=1, wait=3
     )
     if r is None or '查詢無資料' in r.text:
         return pd.DataFrame()
@@ -261,35 +270,44 @@ def fetch_stock_day_fast(sid, yyyymm):
     except:
         return pd.DataFrame()
 
-
 def build_history_fast(sid, months):
-    """逐月抓歷史K棒，快速模式（失敗直接跳過不重試）。"""
     frames = []
     for yyyymm in months:
         df_m = fetch_stock_day_fast(sid, yyyymm)
         if not df_m.empty:
             frames.append(df_m)
-        time.sleep(0.08)   # 縮短 sleep：0.15 → 0.08
+        time.sleep(0.08)
     if not frames:
         return pd.DataFrame()
-    df_all = pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
-    return df_all
-
+    return pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
 
 def calc_ema(series, span):
     return series.ewm(span=span, adjust=False).mean()
 
 def check_ema_bull(df):
-    if len(df) < EMA_LONG:
-        return False
+    """
+    主要：20EMA > 60EMA > 120EMA（需 >= 120 筆資料）
+    備援：10EMA > 20EMA > 60EMA（需 >= 60 筆資料）
+    """
+    if len(df) < EMA_FALLBACK_MIN:
+        return False, 'insufficient'
+
     closes = df['close'].astype(float)
-    ema20  = calc_ema(closes, EMA_SHORT).iloc[-1]
-    ema60  = calc_ema(closes, EMA_MID).iloc[-1]
-    ema120 = calc_ema(closes, EMA_LONG).iloc[-1]
-    return ema20 > ema60 > ema120
+
+    if len(df) >= EMA_LONG2:
+        # 主要模式
+        ema20  = calc_ema(closes, EMA_MID).iloc[-1]
+        ema60  = calc_ema(closes, EMA_LONG1).iloc[-1]
+        ema120 = calc_ema(closes, EMA_LONG2).iloc[-1]
+        return ema20 > ema60 > ema120, 'full'
+    else:
+        # 備援模式（60~119筆）
+        ema10 = calc_ema(closes, EMA_SHORT).iloc[-1]
+        ema20 = calc_ema(closes, EMA_MID).iloc[-1]
+        ema60 = calc_ema(closes, EMA_LONG1).iloc[-1]
+        return ema10 > ema20 > ema60, 'fallback'
 
 def calc_volume_ratio(df, target_date):
-    """當日量 ÷ 前5日均量。"""
     df = df[df['date'] <= target_date].reset_index(drop=True)
     if len(df) < 6:
         return 0.0
@@ -319,7 +337,9 @@ def run_analysis():
     print(f"[執行] 模式={run_mode}，日期={date_str}，台灣時間={now_tw.strftime('%H:%M')}")
     t_start = time.time()
 
-    market = get_market_info(date_str)
+    # ── 平行抓取大盤、T86、MI_INDEX、EPS ──
+    market  = get_market_info(date_str)
+    eps_map = fetch_eps(date_str)   # {sid: eps_str}
 
     r_inst = safe_get(
         'https://www.twse.com.tw/rwd/zh/fund/T86',
@@ -360,7 +380,7 @@ def run_analysis():
                 df_i['_total'] = df_i[avail].apply(pd.to_numeric, errors='coerce').sum(axis=1)
                 col_total = '_total'
             else:
-                raise ValueError(f"找不到法人欄位，現有：{list(df_i.columns)}")
+                raise ValueError(f"找不到法人欄位：{list(df_i.columns)}")
 
         for col in [col_foreign, col_trust, col_dealer, col_total]:
             if col:
@@ -397,7 +417,9 @@ def run_analysis():
         if not all([col_close, col_diff]):
             raise ValueError(f"找不到收盤/漲跌欄：{list(df.columns)}")
 
-        # ── 第一輪：基本條件過濾 ──
+        # ══════════════════════════════════════
+        # 第一輪：基本條件（1.收盤價 2.漲跌幅 3.法人買超）
+        # ══════════════════════════════════════
         candidates = []
         for _, row in df.iterrows():
             try:
@@ -406,14 +428,17 @@ def run_analysis():
                 price = pd.to_numeric(str(row[col_close]).replace(',', ''), errors='coerce')
                 diff  = pd.to_numeric(str(row[col_diff]).replace(',', ''),  errors='coerce')
 
+                # 1. 收盤價下限
                 if pd.isna(price) or pd.isna(diff) or price < MIN_PRICE:
                     continue
+
                 if col_sign:
                     s = str(row[col_sign])
                     diff = -abs(diff) if ('−' in s or s.strip() == '-') else abs(diff)
 
                 change = round((diff / (price - diff)) * 100, 2) if (price - diff) != 0 else 0.0
 
+                # 2. 漲跌幅區間
                 if not (change >= GRADE_A or (GRADE_X_LO <= change < GRADE_X_HI)):
                     continue
 
@@ -426,6 +451,7 @@ def run_analysis():
                 dealer  = float(inst_row[col_dealer].values[0])  if col_dealer  else 0.0
                 total   = foreign + trust + dealer
 
+                # 3. 法人買超下限
                 if total < MIN_INST_SHARE:
                     continue
 
@@ -434,26 +460,27 @@ def run_analysis():
                     'price': price, 'change': change,
                     'foreign': int(foreign), 'trust': int(trust),
                     'dealer':  int(dealer),  'total': int(total),
+                    'eps': eps_map.get(sid, 'N/A'),
                 })
             except:
                 continue
 
-        print(f"[過濾] 基本條件通過：{len(candidates)} 檔")
+        print(f"[過濾1] 基本條件通過：{len(candidates)} 檔")
 
-        # ── 候選數量保護：超過 40 檔時只取法人買超最多的前 40 ──
-        # 避免 EMA 抓取時間過長（每檔約 7 秒，40檔約 280 秒）
-        MAX_CANDIDATES = 40
+        # 4. 候選數量保護
         if len(candidates) > MAX_CANDIDATES:
             candidates.sort(key=lambda e: e['total'], reverse=True)
             candidates = candidates[:MAX_CANDIDATES]
-            print(f"[保護] 候選超過 {MAX_CANDIDATES} 檔，取法人買超前 {MAX_CANDIDATES} 名")
+            print(f"[過濾4] 截斷至前 {MAX_CANDIDATES} 名（依法人買超）")
 
-        # ── 預先載入7個月清單（所有候選共用） ──
-        months = prev_months(date_str, n=7)
+        # ══════════════════════════════════════
+        # 第二輪：量比（5）→ EMA（6）
+        # 量比用當日資料即可，先過濾，減少需要抓歷史K棒的數量
+        # ══════════════════════════════════════
+        months      = prev_months(date_str, n=7)
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
-        print(f"[EMA] 開始抓 {len(candidates)} 檔歷史資料，月份：{months}")
+        print(f"[EMA] 月份清單：{months}")
 
-        # ── 第二輪：EMA + 量比 ──
         ss_list, s_list, a_list, x_list = [], [], [], []
 
         for idx_c, entry in enumerate(candidates):
@@ -463,20 +490,20 @@ def run_analysis():
                 df_hist = build_history_fast(sid, months)
                 elapsed = time.time() - t0
 
-                if df_hist.empty or len(df_hist) < EMA_LONG:
-                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} 資料不足({len(df_hist)}列) {elapsed:.1f}s")
-                    continue
-
-                if not check_ema_bull(df_hist):
-                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} EMA非多頭 {elapsed:.1f}s")
-                    continue
-
+                # 5. 量比（用歷史資料計算，含當日）
                 vol_ratio = calc_volume_ratio(df_hist, target_date)
                 if vol_ratio < VOLUME_RATIO_MIN:
-                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} 量比{vol_ratio:.2f} {elapsed:.1f}s")
+                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} 量比{vol_ratio:.2f} ✗ {elapsed:.1f}s")
+                    continue
+
+                # 6. EMA 多頭排列（含備援）
+                is_bull, ema_mode = check_ema_bull(df_hist)
+                if not is_bull:
+                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} EMA{ema_mode} ✗ {elapsed:.1f}s")
                     continue
 
                 entry['vol_ratio'] = vol_ratio
+                entry['ema_mode']  = ema_mode
                 change = entry['change']
 
                 if   change >= GRADE_SS:                  ss_list.append(entry)
@@ -484,7 +511,7 @@ def run_analysis():
                 elif change >= GRADE_A:                    a_list.append(entry)
                 elif GRADE_X_LO <= change < GRADE_X_HI:   x_list.append(entry)
 
-                print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ 漲{change}% 量比{vol_ratio:.2f} {elapsed:.1f}s")
+                print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ 漲{change}% 量比{vol_ratio:.2f} EMA:{ema_mode} {elapsed:.1f}s")
 
             except Exception as e:
                 print(f"  [{idx_c+1}/{len(candidates)}] {sid} 錯誤：{e}")
@@ -496,12 +523,18 @@ def run_analysis():
         total_elapsed = time.time() - t_start
         print(f"[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)} X={len(x_list)}，總耗時={total_elapsed:.0f}秒")
 
-        # ── 組裝訊息 ──
+        # ══════════════════════════════════════
+        # 組裝 Discord 訊息
+        # ══════════════════════════════════════
         def stock_block(e, emoji_open, grade_label, emoji_close):
-            sign = '+' if e['change'] >= 0 else ''
+            sign   = '+' if e['change'] >= 0 else ''
+            # EMA備援模式標註
+            ema_tag = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
             return (
                 f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}\n"
-                f"🔹收盤價格:{e['price']} ({sign}{e['change']}%)　量比:{e.get('vol_ratio', 0):.1f}x\n"
+                f"🔹收盤價格:{e['price']}\n"
+                f"🔹今日漲幅{sign}{e['change']}%    量比:{e.get('vol_ratio', 0):.1f}x{ema_tag}\n"
+                f"🔹EPS（單季）:{e['eps']}\n"
                 f"🔹外資:{fmt_share(e['foreign'])}股　投信:{fmt_share(e['trust'])}股　自營商:{fmt_share(e['dealer'])}股"
             )
 
