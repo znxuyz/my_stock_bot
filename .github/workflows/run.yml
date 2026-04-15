@@ -2,10 +2,14 @@ name: Daily Stock Bot
 
 on:
   schedule:
-    # 盤後結算：週一至週五 18:00 台灣時間（= UTC 10:00）
-    - cron: '0 10 * * 1-5'
-    # 盤前複習：週二至週六 08:00 台灣時間（= UTC 00:00）
-    - cron: '0 0 * * 2-6'
+    # 盤後結算：提早到台灣 16:00 觸發（UTC 08:00）
+    # 就算 GitHub 延遲 1 小時，最晚也是台灣 17:00 收到
+    - cron: '0 8 * * 1-5'
+
+    # 盤前複習：提早到台灣 06:00 觸發（UTC 22:00，前一天）
+    # 就算延遲 1 小時，最晚也是台灣 07:00 收到
+    - cron: '0 22 * * 0-4'
+
   workflow_dispatch:
     inputs:
       mode:
@@ -16,7 +20,7 @@ on:
 jobs:
   run_bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -34,10 +38,15 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "RUN_MODE=${{ github.event.inputs.mode }}" >> $GITHUB_ENV
-          elif [ "$(date -u +%H)" = "00" ]; then
-            echo "RUN_MODE=preview" >> $GITHUB_ENV
           else
-            echo "RUN_MODE=close" >> $GITHUB_ENV
+            # UTC 22:00 = 台灣隔日 06:00 → 盤前複習
+            # UTC 08:00 = 台灣 16:00       → 盤後結算
+            HOUR=$(date -u +%H)
+            if [ "$HOUR" = "22" ]; then
+              echo "RUN_MODE=preview" >> $GITHUB_ENV
+            else
+              echo "RUN_MODE=close" >> $GITHUB_ENV
+            fi
           fi
 
       - name: Run bot
