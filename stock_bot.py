@@ -139,13 +139,68 @@ def get_market_info(date_str):
         return None
 
 # ══════════════════════════════════════════════════════════
-# EPS（BWIBBU_d，最新單季）
+# ══════════════════════════════════════════════════════════
+# EPS（TWSE OpenAPI，最新單季，全市場一次搞定）
 # ══════════════════════════════════════════════════════════
 def fetch_eps(date_str):
     """
-    抓取 BWIBBU_d 本益比/EPS 表，回傳 {sid: eps_str} 字典。
-    欄位「每股盈餘」= 最新一季 EPS，
-    欄位「財報年/季」= 該季別（例如 113/Q3），一併附在輸出中。
+    來源：openapi.twse.com.tw/v1/exchangeReport/t163sb20
+    一次 GET 取得全市場最新季 EPS（JSON），不需逐股查詢。
+    回傳 {sid: 'X.XX（113/Q4）'} 字典。
+    """
+    r = safe_get(
+        'https://openapi.twse.com.tw/v1/exchangeReport/t163sb20',
+        timeout=20, retries=2, wait=10
+    )
+    if r is None:
+        print("[EPS] openAPI 請求失敗，嘗試備援 BWIBBU_d")
+        return _fetch_eps_fallback(date_str)
+
+    try:
+        data = r.json()
+        if not data:
+            print("[EPS] openAPI 回傳空資料")
+            return _fetch_eps_fallback(date_str)
+
+        eps_dict = {}
+        for item in data:
+            # 欄位名稱：Code, Name, BasEPS, Year, Season（或類似）
+            sid = str(item.get('Code', item.get('證券代號', ''))).strip()
+            if not sid:
+                continue
+            # 找 EPS 值
+            val_raw = item.get('BasEPS', item.get('每股盈餘', item.get('EPS', '')))
+            val = pd.to_numeric(str(val_raw).replace(',', ''), errors='coerce')
+            # 找季別
+            year   = str(item.get('Year',   item.get('年度', ''))).strip()
+            season = str(item.get('Season', item.get('季別', ''))).strip()
+            if year and season:
+                quarter_str = f"{year}/Q{season}"
+            else:
+                quarter_str = ''
+
+            if pd.isna(val):
+                eps_dict[sid] = 'N/A'
+            elif quarter_str:
+                eps_dict[sid] = f"{val:.2f}（{quarter_str}）"
+            else:
+                eps_dict[sid] = f"{val:.2f}"
+
+        print(f"[EPS] openAPI 成功，取得 {len(eps_dict)} 檔")
+        # 印出第一筆確認格式
+        if eps_dict:
+            sample = list(eps_dict.items())[:1]
+            print(f"[EPS] 範例：{sample}")
+        return eps_dict
+
+    except Exception as e:
+        print(f"[EPS] openAPI 解析失敗：{e}，嘗試備援")
+        return _fetch_eps_fallback(date_str)
+
+
+def _fetch_eps_fallback(date_str):
+    """
+    備援：從 BWIBBU_d 抓（僅有配息股有值，其餘 N/A）。
     """
     r = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/BWIBBU_d',
@@ -153,56 +208,69 @@ def fetch_eps(date_str):
         timeout=20, retries=2, wait=10
     )
     if r is None or '查詢無資料' in r.text:
-        print("[EPS] 查無資料，跳過")
         return {}
-
     try:
         text = r.text
         idx = text.find('"證券代號"')
         if idx == -1:
             idx = text.find('證券代號')
         if idx == -1:
-            print(f"[EPS] 找不到表頭，前300字：\n{text[:300]}")
             return {}
         idx = text.rfind('\n', 0, idx) + 1
-
-        df = safe_read_csv(text[idx:], 'BWIBBU_d', min_cols=5)
+        df = safe_read_csv(text[idx:], 'BWIBBU_d-fallback', min_cols=5)
         if df.empty:
             return {}
-
         df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
         df['sid_clean'] = clean_sid(df.iloc[:, 0])
-
-        # 欄位：證券代號, 證券名稱, 殖利率(%), 股利年度, 本益比, 股價淨值比, 財報年/季, 每股盈餘
         col_eps     = find_col(df, '每股盈餘')
-        col_quarter = find_col(df, '財報年')   # 「財報年/季」欄
-
+        col_quarter = find_col(df, '財報年')
         if col_eps is None:
-            print(f"[EPS] 找不到「每股盈餘」欄，現有欄位：{list(df.columns)}")
             return {}
-
-        print(f"[EPS] EPS欄={col_eps}  季別欄={col_quarter}")
-
         eps_dict = {}
         for _, row in df.iterrows():
             sid = row['sid_clean']
             val = pd.to_numeric(str(row[col_eps]).replace(',', ''), errors='coerce')
             if pd.isna(val):
                 eps_dict[sid] = 'N/A'
-                continue
-            # 附上季別，例如：3.52（113/Q3）
-            if col_quarter:
-                quarter = str(row[col_quarter]).strip().replace(' ', '')
-                eps_dict[sid] = f"{val:.2f}（{quarter}）"
             else:
-                eps_dict[sid] = f"{val:.2f}"
-
-        print(f"[EPS] 成功取得 {len(eps_dict)} 檔")
+                q = str(row[col_quarter]).strip() if col_quarter else ''
+                eps_dict[sid] = f"{val:.2f}（{q}）" if q else f"{val:.2f}"
+        print(f"[EPS備援] 取得 {len(eps_dict)} 檔")
         return eps_dict
-
     except Exception as e:
-        print(f"[EPS] 解析失敗：{e}")
+        print(f"[EPS備援] 失敗：{e}")
         return {}
+
+# ══════════════════════════════════════════════════════════
+# 股市趨勢新聞（Google News RSS，台股相關）
+# ══════════════════════════════════════════════════════════
+def fetch_stock_news(count=10):
+    """
+    從 Google News RSS 抓取台股相關新聞標題。
+    回傳最新 count 則新聞的清單 [{'title': ..., 'source': ...}]。
+    """
+    import xml.etree.ElementTree as ET
+    rss_url = 'https://news.google.com/rss/search?q=台股+股市&hl=zh-TW&gl=TW&ceid=TW:zh-Hant'
+    r = safe_get(rss_url, timeout=15, retries=2, wait=5)
+    if r is None:
+        print("[新聞] 抓取失敗")
+        return []
+    try:
+        root = ET.fromstring(r.content)
+        items = root.findall('.//item')
+        news = []
+        for item in items[:count]:
+            title  = item.findtext('title', '').strip()
+            source = item.findtext('source', '').strip()
+            # 去掉標題末尾的來源名稱（Google News 格式：標題 - 來源）
+            if ' - ' in title:
+                title, source = title.rsplit(' - ', 1)
+            news.append({'title': title.strip(), 'source': source.strip()})
+        print(f"[新聞] 取得 {len(news)} 則")
+        return news
+    except Exception as e:
+        print(f"[新聞] 解析失敗：{e}")
+        return []
 
 # ══════════════════════════════════════════════════════════
 # T86 法人解析
@@ -584,6 +652,22 @@ def run_analysis():
             )
             if i < len(chunks) - 1:
                 time.sleep(1)
+
+        # ── 股市趨勢新聞（股票清單發送完畢後獨立發送）──
+        news_list = fetch_stock_news(count=10)
+        if news_list:
+            news_lines = ['📰 **【台股趨勢新聞】**\n' + '─'*25]
+            for i, n in enumerate(news_list, 1):
+                source_tag = f"　_{n['source']}_" if n['source'] else ''
+                news_lines.append(f"{i}. {n['title']}{source_tag}")
+            news_msg = '\n'.join(news_lines)
+            requests.post(
+                WEBHOOK_URL,
+                json={'username': '川投顧量化系統', 'content': news_msg},
+                timeout=15
+            )
+        else:
+            print("[新聞] 無資料，跳過發送")
 
     except Exception as e:
         import traceback
