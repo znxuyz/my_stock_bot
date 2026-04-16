@@ -3,7 +3,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 
 WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK')
-HEADERS     = {'User-Agent': 'Mozilla/5.0'}
+HEADERS = {
+    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Accept-Language': 'zh-TW,zh;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Referer':         'https://www.twse.com.tw/',
+}
 
 # ══════════════════════════════════════════════════════════
 # 篩選參數 ── 只改這裡就能調整條件
@@ -11,7 +16,7 @@ HEADERS     = {'User-Agent': 'Mozilla/5.0'}
 MIN_PRICE        = 10      # 1. 收盤價下限（元）
 # 2. 漲跌幅區間：漲幅 >= GRADE_A 或 跌幅 GRADE_X_LO~GRADE_X_HI（程式內判斷）
 MIN_INST_SHARE   = 50000   # 3. 法人合計買超最低股數（50張 = 50,000股）
-MAX_CANDIDATES   = 100      # 4. 候選數量保護上限（取法人買超最多的前N名）
+MAX_CANDIDATES   = 50      # 4. 候選數量保護上限（取法人買超最多的前N名）
 VOLUME_RATIO_MIN = 1.5     # 5. 量比：當日量 ÷ 近5日均量
 # 6. EMA 多頭排列（程式內判斷，含備援邏輯）
 
@@ -386,16 +391,23 @@ def run_analysis():
     r_inst = safe_get(
         'https://www.twse.com.tw/rwd/zh/fund/T86',
         params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
-        timeout=20, retries=3, wait=15
+        timeout=40, retries=5, wait=20
     )
     r_price = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
         params={'response': 'csv', 'date': date_str, 'type': 'ALLBUT0999'},
-        timeout=20, retries=3, wait=15
+        timeout=40, retries=5, wait=20
     )
 
     if r_inst is None or r_price is None:
-        requests.post(WEBHOOK_URL, json={'content': f'❌ 無法取得個股資料（{date_str}），請稍後重試。'}, timeout=15)
+        which = 'T86(法人)' if r_inst is None else 'MI_INDEX(價格)'
+        requests.post(WEBHOOK_URL, json={
+            'content': (
+                f'❌ 無法取得個股資料（{date_str}）\n'
+                f'失敗來源：{which}\n'
+                f'已重試 5 次，可能是 TWSE 暫時封鎖海外 IP，請稍後用 /run 手動重試。'
+            )
+        }, timeout=15)
         return
     if '查詢無資料' in r_inst.text or '查詢無資料' in r_price.text:
         requests.post(WEBHOOK_URL, json={'content': f'ℹ️ {date_str} 查無資料（假日或尚未更新）。'}, timeout=15)
