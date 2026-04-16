@@ -1,4 +1,6 @@
 import os, requests, io, time
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import pandas as pd
 from datetime import datetime, timedelta
 
@@ -49,7 +51,7 @@ def clean_sid(series):
 def safe_get(url, params=None, timeout=25, retries=3, wait=15):
     for attempt in range(1, retries + 1):
         try:
-            r = requests.get(url, params=params, headers=HEADERS, timeout=timeout)
+            r = requests.get(url, params=params, headers=HEADERS, timeout=timeout, verify=False)
             r.raise_for_status()
             return r
         except requests.exceptions.Timeout:
