@@ -37,13 +37,14 @@ last_run = {
 # ════════════════════════════════════════════════════════════
 def verify_signature(raw_body: bytes, signature: str, timestamp: str) -> bool:
     try:
-        message  = timestamp.encode() + raw_body
-        expected = hmac.new(
-            bytes.fromhex(PUBLIC_KEY),
-            message,
-            digestmod=hashlib.sha256
-        ).hexdigest()
-        return hmac.compare_digest(expected, signature)
+        from nacl.signing import VerifyKey
+        from nacl.exceptions import BadSignatureError
+        verify_key = VerifyKey(bytes.fromhex(PUBLIC_KEY))
+        verify_key.verify(
+            timestamp.encode() + raw_body,
+            bytes.fromhex(signature)
+        )
+        return True
     except Exception:
         return False
 
