@@ -1,7 +1,0 @@
-{
-  "deploy": {
-    "startCommand": "python bot.py",
-    "healthcheckPath": "/",
-    "healthcheckTimeout": 30
-  }
-}
