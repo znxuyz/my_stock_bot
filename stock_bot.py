@@ -642,10 +642,9 @@ def run_analysis():
             lst.sort(key=lambda e: e['change'], reverse=True)
         x_list.sort(key=lambda e: e['total'], reverse=True)
 
-        # 寫入資料庫
+        # 寫入資料庫（對所有已設定伺服器各存一份）
         if _DB_OK:
             try:
-                _db.init_db()
                 from datetime import date as _date
                 _sd = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
                 _all = []
@@ -658,8 +657,13 @@ def run_analysis():
                     _e2 = dict(_e); _e2['grade'] = _g
                     _all.append(_e2)
                 if _all:
-                    _db.save_screen_records(_all, _sd)
-                    print(f"[DB] 儲存 {len(_all)} 筆")
+                    _guilds = _db.get_all_webhooks()
+                    for _gw in _guilds:
+                        try:
+                            _db.save_screen_records(_all, _sd, _gw['guild_id'])
+                        except Exception as _ge:
+                            print(f"[DB] guild {_gw['guild_id']} 寫入失敗：{_ge}")
+                    print(f"[DB] 儲存 {len(_all)} 筆至 {len(_guilds)} 個伺服器")
             except Exception as _dbe:
                 print(f"[DB] 寫入失敗：{_dbe}")
 
@@ -733,14 +737,27 @@ def run_analysis():
         if buf:
             chunks.append(buf)
 
-        for i, chunk in enumerate(chunks):
-            requests.post(
-                WEBHOOK_URL,
-                json={'username': '川投顧量化系統', 'content': chunk},
-                timeout=15
-            )
-            if i < len(chunks) - 1:
-                time.sleep(1)
+        # 發送至所有已設定伺服器
+        webhooks = [WEBHOOK_URL] if WEBHOOK_URL else []
+        if _DB_OK:
+            try:
+                for gw in _db.get_all_webhooks():
+                    wh = gw['webhook_url']
+                    if wh and wh not in webhooks:
+                        webhooks.append(wh)
+            except Exception as _we:
+                print(f"[DB] 取得 webhook 失敗：{_we}")
+
+        for wh in webhooks:
+            for i, chunk in enumerate(chunks):
+                requests.post(
+                    wh,
+                    json={'username': '川投顧量化系統', 'content': chunk},
+                    timeout=15
+                )
+                if i < len(chunks) - 1:
+                    time.sleep(0.5)
+            time.sleep(1)
 
         # ── 股市趨勢新聞（股票清單發送完畢後獨立發送）──
         news_list = fetch_stock_news(count=10)
