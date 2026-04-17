@@ -223,6 +223,9 @@ def analyze_stock(sid):
         tag   = '（今日）' if i == len(recent)-1 else f'（-{len(recent)-1-i}日）'
         trend_lines.append(f'  {d} {arrow} {c:,.1f} 元 {("+" if ch>=0 else "")}{ch}% {tag}')
 
+    # 乖離率與入場建議（直接用 stock_bot 的函式）
+    bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
+
     sign = '+' if diff >= 0 else ''
     msg  = (
         f'🔍 **{sid}**\n'
@@ -234,6 +237,14 @@ def analyze_stock(sid):
         msg += f'👥 外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股\n'
     if trend_lines:
         msg += '\n📅 **近3交易日走勢**\n' + '\n'.join(trend_lines) + '\n'
+    if bias:
+        sp = '+' if bias['bias_pct'] >= 0 else ''
+        msg += (
+            f'\n📐 乖離率（10日）：{sp}{bias["bias_pct"]}%　{bias["bias_emoji"]} {bias["bias_label"]}\n'
+            f'💡 建議入場：{bias["entry_price"]:,.1f} 元\n'
+            f'🎯 目標一：{bias["target1"]:,.1f} 元　目標二：{bias["target2"]:,.1f} 元\n'
+            f'⛔ 停損參考：{bias["stop_loss"]:,.1f} 元（-5%）\n'
+        )
     msg += (
         f'\n⭐ **推薦度：{star_str(stars)}**\n'
         f'📝 {rec}'
@@ -901,13 +912,13 @@ def scheduler():
     while True:
         now = tw_now()
         h, wd, mn = now.hour, now.weekday(), now.minute
-        if wd < 5 and h == 16 and mn == 0:
+        if wd < 5 and h == 17 and mn == 0:
             k = (now.date(), 'close')
             if k not in fired:
                 fired.add(k)
                 os.environ['RUN_MODE'] = 'auto'
                 threading.Thread(target=sb.run_analysis, daemon=True).start()
-        if 0 < wd <= 5 and h == 6 and mn == 0:
+        if 0 < wd <= 5 and h == 7 and mn == 0:
             k = (now.date(), 'preview')
             if k not in fired:
                 fired.add(k)
