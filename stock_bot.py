@@ -24,7 +24,7 @@ HEADERS = {
 MIN_PRICE        = 10      # 1. 收盤價下限（元）
 # 2. 漲跌幅區間：漲幅 >= GRADE_A 或 跌幅 GRADE_X_LO~GRADE_X_HI（程式內判斷）
 MIN_INST_SHARE   = 50000   # 3. 法人合計買超最低股數（50張 = 50,000股）
-MAX_CANDIDATES   = 50      # 4. 候選數量保護上限（取法人買超最多的前N名）
+MAX_CANDIDATES   = 100      # 4. 候選數量保護上限（取法人買超最多的前N名）
 VOLUME_RATIO_MIN = 1.5     # 5. 量比：當日量 ÷ 近5日均量
 # 6. EMA 多頭排列（程式內判斷，含備援邏輯）
 
