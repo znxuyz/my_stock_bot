@@ -1,4 +1,10 @@
 import os, requests, io, time
+try:
+    import db as _db
+    _DB_OK = True
+except Exception as _e:
+    _DB_OK = False
+    print(f'[DB] 無法載入資料庫模組：{_e}')
 import urllib3
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 import pandas as pd
@@ -635,6 +641,27 @@ def run_analysis():
         for lst in [ss_list, s_list, a_list]:
             lst.sort(key=lambda e: e['change'], reverse=True)
         x_list.sort(key=lambda e: e['total'], reverse=True)
+
+        # 寫入資料庫
+        if _DB_OK:
+            try:
+                _db.init_db()
+                from datetime import date as _date
+                _sd = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
+                _all = []
+                for _e, _g in (
+                    [(e, 'SS') for e in ss_list] +
+                    [(e, 'S')  for e in s_list]  +
+                    [(e, 'A')  for e in a_list]  +
+                    [(e, 'X')  for e in x_list]
+                ):
+                    _e2 = dict(_e); _e2['grade'] = _g
+                    _all.append(_e2)
+                if _all:
+                    _db.save_screen_records(_all, _sd)
+                    print(f"[DB] 儲存 {len(_all)} 筆")
+            except Exception as _dbe:
+                print(f"[DB] 寫入失敗：{_dbe}")
 
         total_elapsed = time.time() - t_start
         print(f"[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)} X={len(x_list)}，總耗時={total_elapsed:.0f}秒")
