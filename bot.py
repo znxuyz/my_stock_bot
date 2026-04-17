@@ -395,7 +395,7 @@ def cmd_help():
         '📈 `/topbuyer` 今日外資買超前 10 名\n'
         '📉 `/topseller` 今日外資賣超前 10 名\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━\n'
-        '💼 `/holding` 查看你的持倉紀錄\n'
+        '💼 `/holding [@對象]` 查看持倉紀錄（不填則看自己）\n'
         '🛒 `/buy [代號] [價格] [股數]` 記錄買入\n'
         '💸 `/sell [代號] [價格] [股數]` 記錄賣出並計算損益\n'
         '🏆 `/leaderboard` 伺服器損益排行榜\n'
@@ -447,8 +447,8 @@ def get_latest_price(sid):
 def cmd_holding(uid, uname):
     holdings = db['holdings'].get(uid, [])
     if not holdings:
-        return f'💼 **{uname} 的持倉**\n\n目前尚無持倉記錄。使用 `/buy` 記錄買入。'
-    lines = [f'💼 **{uname} 的持倉**\n']
+        return f'💼 **{uname} 的持倉**\n\n目前尚無持倉記錄。'
+    lines = [f'💼 **{view_name} 的持倉**\n']
     total_cost   = 0
     total_mkt    = 0
     total_unreal = 0
@@ -649,7 +649,11 @@ def register_commands():
         {'name': 'roast',   'description': '🗣️ 川投顧用川普語氣評論今日大盤'},
         {'name': 'topbuyer',  'description': '📈 今日外資買超前 10 名'},
         {'name': 'topseller', 'description': '📉 今日外資賣超前 10 名'},
-        {'name': 'holding', 'description': '💼 查看你的持倉紀錄'},
+        {'name': 'holding', 'description': '💼 查看持倉紀錄（不填看自己，填 @ 看別人）',
+         'options': [
+             {'name': 'target', 'description': '@某人（不填則看自己）',
+              'type': 6, 'required': False}
+         ]},
         {'name': 'buy',     'description': '🛒 記錄買入股票',
          'options': [
              {'name': 'code',  'description': '股票代號', 'type': 3,  'required': True},
@@ -737,11 +741,31 @@ class InteractionHandler(BaseHTTPRequestHandler):
 
             if cmd == 'holding':
                 self.send_json(200, {'type': 5})
-                def _holding_bg():
+                # 解析 target（被 @ 的人）
+                target_opt = get_opt(opts, 'target')
+                h_uid  = uid
+                h_name = uname
+                if target_opt:
+                    resolved = body['data'].get('resolved', {})
+                    users    = resolved.get('users', {})
+                    tid      = str(target_opt)
+                    if tid in users:
+                        u      = users[tid]
+                        h_uid  = tid
+                        h_name = (u.get('global_name') or
+                                  u.get('username', f'用戶{tid}'))
+                    else:
+                        # resolved 沒有找到，還是用 tid 當 key 查資料庫
+                        h_uid  = tid
+                        h_name = f'用戶{tid}'
+
+                # 明確傳入參數避免 closure 捕捉問題
+                def _holding_bg(_h_uid=h_uid, _h_name=h_name, _self_uid=uid, _self_name=uname):
                     import requests as req
                     followup = f'https://discord.com/api/v10/webhooks/{APP_ID}/{token}/messages/@original'
-                    req.patch(followup, json={'content': '💼 正在查詢持倉與最新股價...'}, timeout=10)
-                    result = cmd_holding(uid, uname)
+                    label = f'**{_h_name}**' if _h_uid != _self_uid else '你'
+                    req.patch(followup, json={'content': f'💼 正在查詢 {label} 的持倉...'}, timeout=10)
+                    result = cmd_holding(_h_uid, _h_name)
                     req.patch(followup, json={'content': result}, timeout=10)
                 threading.Thread(target=_holding_bg, daemon=True).start()
                 return
