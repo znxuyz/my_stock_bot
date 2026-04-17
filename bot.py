@@ -11,7 +11,7 @@ try:
 except Exception:
     _DB_OK = False
 from datetime import datetime, timedelta, date
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import HTTPServer, BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(__file__))
 import stock_bot as sb
@@ -709,7 +709,10 @@ class InteractionHandler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def do_GET(self):
-        self.send_response(200); self.end_headers(); self.wfile.write(b'OK')
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/plain')
+        self.end_headers()
+        self.wfile.write(b'OK')
 
     def do_POST(self):
         length   = int(self.headers.get('Content-Length', 0))
@@ -1283,4 +1286,4 @@ if __name__ == '__main__':
     register_commands()
     threading.Thread(target=scheduler, daemon=True).start()
     print(f"[Bot] 已啟動，監聽 port {PORT}")
-    HTTPServer(('0.0.0.0', PORT), InteractionHandler).serve_forever()
+    ThreadingHTTPServer(('0.0.0.0', PORT), InteractionHandler).serve_forever()
