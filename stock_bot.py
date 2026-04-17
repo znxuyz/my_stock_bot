@@ -24,7 +24,7 @@ HEADERS = {
 MIN_PRICE        = 10      # 1. 收盤價下限（元）
 # 2. 漲跌幅區間：漲幅 >= GRADE_A 或 跌幅 GRADE_X_LO~GRADE_X_HI（程式內判斷）
 MIN_INST_SHARE   = 50000   # 3. 法人合計買超最低股數（50張 = 50,000股）
-MAX_CANDIDATES   = 100      # 4. 候選數量保護上限（取法人買超最多的前N名）
+MAX_CANDIDATES   = 50      # 4. 候選數量保護上限（取法人買超最多的前N名）
 VOLUME_RATIO_MIN = 1.5     # 5. 量比：當日量 ÷ 近5日均量
 # 6. EMA 多頭排列（程式內判斷，含備援邏輯）
 
@@ -260,7 +260,7 @@ def fetch_stock_day_fast(sid, yyyymm):
         text = r.text
         idx = text.find('"日期"')
         if idx == -1:
-            for yr in ['114/', '113/', '112/']:
+            for yr in ['115/', '114/', '113/', '112/']:
                 idx = text.find(yr)
                 if idx != -1:
                     idx = text.rfind('\n', 0, idx) + 1
@@ -657,13 +657,26 @@ def run_analysis():
                     _e2 = dict(_e); _e2['grade'] = _g
                     _all.append(_e2)
                 if _all:
+                    # 轉換 numpy 型別為 Python 原生型別
+                    def _to_native(v):
+                        import numpy as _np
+                        if isinstance(v, (_np.integer,)): return int(v)
+                        if isinstance(v, (_np.floating,)): return float(v)
+                        return v
+                    _all_clean = []
+                    for _e in _all:
+                        _all_clean.append({k: _to_native(v) for k, v in _e.items()
+                                           if k not in ('bias',)})
+                        if _e.get('bias'):
+                            _all_clean[-1]['bias'] = {k: _to_native(v)
+                                                      for k, v in _e['bias'].items()}
                     _guilds = _db.get_all_webhooks()
                     for _gw in _guilds:
                         try:
-                            _db.save_screen_records(_all, _sd, _gw['guild_id'])
+                            _db.save_screen_records(_all_clean, _sd, _gw['guild_id'])
                         except Exception as _ge:
                             print(f"[DB] guild {_gw['guild_id']} 寫入失敗：{_ge}")
-                    print(f"[DB] 儲存 {len(_all)} 筆至 {len(_guilds)} 個伺服器")
+                    print(f"[DB] 儲存 {len(_all_clean)} 筆至 {len(_guilds)} 個伺服器")
             except Exception as _dbe:
                 print(f"[DB] 寫入失敗：{_dbe}")
 
