@@ -396,8 +396,8 @@ def cmd_help():
         '📉 `/topseller` 今日外資賣超前 10 名\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━\n'
         '💼 `/holding` 查看你的持倉紀錄\n'
-        '🛒 `/buy [代號] [價格] [張數]` 記錄買入\n'
-        '💸 `/sell [代號] [價格] [張數]` 記錄賣出並計算損益\n'
+        '🛒 `/buy [代號] [價格] [股數]` 記錄買入\n'
+        '💸 `/sell [代號] [價格] [股數]` 記錄賣出並計算損益\n'
         '🏆 `/leaderboard` 伺服器損益排行榜\n'
         '━━━━━━━━━━━━━━━━━━━━━━━━\n'
         '🗳️ `/poll [題目] [選項1] [選項2]` 發起投票\n'
@@ -453,10 +453,10 @@ def cmd_holding(uid, uname):
     total_mkt    = 0
     total_unreal = 0
     for h in holdings:
-        cost    = h['price'] * h['lots'] * 1000
+        cost    = h['price'] * h['lots']
         cur     = get_latest_price(h['sid'])
         if cur:
-            mkt     = cur * h['lots'] * 1000
+            mkt     = cur * h['lots']
             unreal  = mkt - cost
             sign    = '+' if unreal >= 0 else ''
             emoji   = '🟢' if unreal >= 0 else '🔴'
@@ -468,7 +468,7 @@ def cmd_holding(uid, uname):
             cur_str = '（無法取得最新價格）'
         total_cost += cost
         lines.append(
-            f'**{h["sid"]}**　成本 {h["price"]} 元 × {h["lots"]} 張\n'
+            f'**{h["sid"]}**　成本 {h["price"]} 元 × {h["lots"]:,} 股\n'
             f'　　　現價 {cur_str}\n'
             f'　　　買入日：{h["date"]}'
         )
@@ -493,10 +493,10 @@ def cmd_buy(uid, uname, sid, price, lots):
         db['trades'][uid] = []
     db['trades'][uid].append({**entry, 'action': 'buy'})
     save_data(db)
-    cost = price * lots * 1000
+    cost = price * lots
     return (
         f'🛒 **買入記錄成功**\n'
-        f'股票：{sid}　價格：{price} 元　張數：{lots} 張\n'
+        f'股票：{sid}　價格：{price} 元　股數：{lots:,} 股\n'
         f'投入金額：**{cost:,.0f} 元**'
     )
 
@@ -516,7 +516,7 @@ def cmd_sell(uid, uname, sid, price, lots):
             remaining.append(h)
             continue
         take = min(sold_lots, h['lots'])
-        realized  += (price - h['price']) * take * 1000
+        realized  += (price - h['price']) * take
         sold_lots -= take
         if h['lots'] > take:
             remaining.append({**h, 'lots': h['lots'] - take})
@@ -534,7 +534,7 @@ def cmd_sell(uid, uname, sid, price, lots):
     sign  = '+' if realized >= 0 else ''
     return (
         f'💸 **賣出記錄成功**\n'
-        f'股票：{sid}　價格：{price} 元　張數：{lots} 張\n'
+        f'股票：{sid}　價格：{price} 元　股數：{lots:,} 股\n'
         f'{emoji} 本次損益：**{sign}{realized:,.0f} 元**\n'
         f'累計損益：**{sign}{db["pnl"][uid]:,.0f} 元**'
     )
@@ -654,13 +654,13 @@ def register_commands():
          'options': [
              {'name': 'code',  'description': '股票代號', 'type': 3,  'required': True},
              {'name': 'price', 'description': '買入價格（元）', 'type': 10, 'required': True},
-             {'name': 'lots',  'description': '買入張數', 'type': 4,  'required': True},
+             {'name': 'lots',  'description': '買入股數（例如：1000）', 'type': 4,  'required': True},
          ]},
         {'name': 'sell',    'description': '💸 記錄賣出股票並計算損益',
          'options': [
              {'name': 'code',  'description': '股票代號', 'type': 3,  'required': True},
              {'name': 'price', 'description': '賣出價格（元）', 'type': 10, 'required': True},
-             {'name': 'lots',  'description': '賣出張數', 'type': 4,  'required': True},
+             {'name': 'lots',  'description': '賣出股數（例如：1000）', 'type': 4,  'required': True},
          ]},
         {'name': 'poll',    'description': '🗳️ 發起股票話題投票',
          'options': [
