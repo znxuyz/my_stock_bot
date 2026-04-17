@@ -368,6 +368,56 @@ def calc_volume_ratio(df, target_date):
 # ══════════════════════════════════════════════════════════
 # 主分析
 # ══════════════════════════════════════════════════════════
+def calc_bias_and_entry(df, price):
+    """
+    計算 10 日乖離率與建議入場價、目標價、停損價。
+    回傳 dict：bias_pct, bias_label, bias_emoji,
+               entry_price, target1, target2, stop_loss
+    """
+    if len(df) < 10:
+        return None
+    closes = df['close'].astype(float)
+    ma10   = closes.tail(10).mean()
+    if ma10 == 0:
+        return None
+
+    bias_pct = round((price - ma10) / ma10 * 100, 2)
+
+    if bias_pct > 8:
+        bias_emoji = '❌'
+        bias_label = '過高，不建議追'
+    elif bias_pct > 5:
+        bias_emoji = '⚠️'
+        bias_label = '略高，小心追高'
+    elif bias_pct >= 0:
+        bias_emoji = '✅'
+        bias_label = '理想進場區'
+    else:
+        bias_emoji = '🔄'
+        bias_label = '底部觀察'
+
+    # 建議入場價：現價×0.98、MA10×1.02、近3日最低，取最低
+    recent3_low  = df['close'].tail(3).min()
+    candidate_a  = round(price * 0.98, 1)
+    candidate_b  = round(ma10 * 1.02, 1)
+    candidate_c  = round(float(recent3_low), 1)
+    entry_price  = min(candidate_a, candidate_b, candidate_c)
+
+    # 目標價（以 MA10 為基準算乖離）
+    target1   = round(ma10 * 1.08, 1)
+    target2   = round(ma10 * 1.12, 1)
+    stop_loss = round(price * 0.95, 1)
+
+    return {
+        'bias_pct':   bias_pct,
+        'bias_label': bias_label,
+        'bias_emoji': bias_emoji,
+        'entry_price': entry_price,
+        'target1':    target1,
+        'target2':    target2,
+        'stop_loss':  stop_loss,
+    }
+
 def run_analysis():
     if not WEBHOOK_URL:
         print('[錯誤] 未設定 DISCORD_WEBHOOK 環境變數')
@@ -567,6 +617,9 @@ def run_analysis():
 
                 entry['vol_ratio'] = vol_ratio
                 entry['ema_mode']  = ema_mode
+                # 計算乖離率與入場建議
+                bias_info = calc_bias_and_entry(df_hist, entry['price'])
+                entry['bias'] = bias_info
                 change = entry['change']
 
                 if   change >= GRADE_SS:                  ss_list.append(entry)
@@ -590,15 +643,30 @@ def run_analysis():
         # 組裝 Discord 訊息
         # ══════════════════════════════════════
         def stock_block(e, emoji_open, grade_label, emoji_close):
-            sign   = '+' if e['change'] >= 0 else ''
-            # EMA備援模式標註
+            sign    = '+' if e['change'] >= 0 else ''
             ema_tag = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
-            return (
-                f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}\n"
-                f"🔹收盤價格:{e['price']}\n"
-                f"🔹今日漲幅{sign}{e['change']}%    量比:{e.get('vol_ratio', 0):.1f}x{ema_tag}\n"
-                f"🔹外資:{fmt_share(e['foreign'])}股　投信:{fmt_share(e['trust'])}股"
-            )
+            b       = e.get('bias')
+            lines   = [
+                f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}",
+                f"🔹收盤價格：{e['price']}　漲幅：{sign}{e['change']}%　量比：{e.get('vol_ratio', 0):.1f}x{ema_tag}",
+                f"🔹外資：{fmt_share(e['foreign'])}股　投信：{fmt_share(e['trust'])}股",
+            ]
+            if b:
+                sp = '+' if b['bias_pct'] >= 0 else ''
+                lines.append(
+                    f"📐 乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}"
+                )
+                lines.append(
+                    f"💡 建議入場：{b['entry_price']:,.1f} 元"
+                )
+                lines.append(
+                    f"🎯 目標一：{b['target1']:,.1f} 元　目標二：{b['target2']:,.1f} 元"
+                )
+                lines.append(
+                    f"⛔ 停損參考：{b['stop_loss']:,.1f} 元（-5%）"
+                )
+            lines.append('─' * 25)
+            return '\n'.join(lines)
 
         if market:
             sd = '+' if market['diff'] >= 0 else ''
