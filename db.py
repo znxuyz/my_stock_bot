@@ -10,10 +10,14 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import date, timedelta
 
-DB_URL = os.environ.get('DATABASE_URL', '')
-
 def get_conn():
-    return psycopg2.connect(DB_URL)
+    url = os.environ.get('DATABASE_URL', '')
+    if not url:
+        raise Exception('DATABASE_URL 環境變數未設定')
+    # psycopg2 需要 postgresql:// 而非 postgres://
+    if url.startswith('postgres://'):
+        url = url.replace('postgres://', 'postgresql://', 1)
+    return psycopg2.connect(url)
 
 def init_db():
     ddl = """
