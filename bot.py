@@ -137,15 +137,45 @@ def analyze_stock(sid):
     vol_ratio        = sb.calc_volume_ratio(df_all, latest['date'])
     is_bull, ema_mode = sb.check_ema_bull(df_all)
 
-    # 星級
+    # 前3交易日分析（用於加強星級判斷）
+    recent3 = df_all.tail(4)  # 含今日共4筆
+    changes_3d = []
+    volratios_3d = []
+    for i in range(len(recent3)-1, 0, -1):
+        c_now  = recent3.iloc[i]['close']
+        c_prev = recent3.iloc[i-1]['close']
+        if c_prev:
+            changes_3d.append((c_now - c_prev) / c_prev * 100)
+    # 前3日量比（用今日量 vs 更早均量）
+    if len(df_all) >= 6:
+        for i in range(len(df_all)-3, len(df_all)):
+            today_vol = df_all.iloc[i]['volume']
+            avg5      = df_all.iloc[max(0,i-6):i-1]['volume'].mean()
+            if avg5 > 0:
+                volratios_3d.append(today_vol / avg5)
+
+    avg_change_3d   = sum(changes_3d) / len(changes_3d) if changes_3d else change
+    avg_volratio_3d = sum(volratios_3d) / len(volratios_3d) if volratios_3d else vol_ratio
+    # 前3日連漲天數
+    up_days = sum(1 for c in changes_3d if c > 0)
+
+    # 星級（綜合前3日）
     stars = 0.0
     if is_bull:
         stars += 1.5 if ema_mode == 'full' else 1.0
-    if vol_ratio >= 2.0: stars += 1.0
-    elif vol_ratio >= 1.5: stars += 0.5
-    if change >= 3.5:   stars += 1.0
-    elif change >= 1.0: stars += 0.5
-    elif change < -1.0: stars -= 0.5
+    # 量比：用前3日平均
+    if avg_volratio_3d >= 2.0: stars += 1.0
+    elif avg_volratio_3d >= 1.5: stars += 0.5
+    # 漲幅：今日 + 前3日平均
+    if change >= 3.5:              stars += 0.5
+    elif change >= 1.0:            stars += 0.25
+    elif change < -1.0:            stars -= 0.5
+    if avg_change_3d >= 2.0:       stars += 0.5
+    elif avg_change_3d >= 0.5:     stars += 0.25
+    elif avg_change_3d < -1.0:     stars -= 0.25
+    # 連漲加分
+    if up_days == 3:               stars += 0.5
+    elif up_days == 2:             stars += 0.25
 
     foreign = trust = None
     try:
@@ -180,6 +210,19 @@ def analyze_stock(sid):
     elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
     else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
 
+    # 前3交易日走勢
+    recent = df_all.tail(4)  # 取最近4筆（今日+前3日）
+    trend_lines = []
+    for i in range(len(recent)-1, 0, -1):
+        row_c = recent.iloc[i]
+        row_p = recent.iloc[i-1]
+        d     = row_c['date']
+        c     = row_c['close']
+        ch    = round((c - row_p['close']) / row_p['close'] * 100, 2) if row_p['close'] else 0
+        arrow = '▲' if ch >= 0 else '▼'
+        tag   = '（今日）' if i == len(recent)-1 else f'（-{len(recent)-1-i}日）'
+        trend_lines.append(f'  {d} {arrow} {c:,.1f} 元 {("+" if ch>=0 else "")}{ch}% {tag}')
+
     sign = '+' if diff >= 0 else ''
     msg  = (
         f'🔍 **{sid}**\n'
@@ -189,6 +232,8 @@ def analyze_stock(sid):
     )
     if foreign is not None:
         msg += f'👥 外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股\n'
+    if trend_lines:
+        msg += '\n📅 **近3交易日走勢**\n' + '\n'.join(trend_lines) + '\n'
     msg += (
         f'\n⭐ **推薦度：{star_str(stars)}**\n'
         f'📝 {rec}'
@@ -369,20 +414,72 @@ def cmd_fortune():
 def cmd_roast():
     return f'🗣️ **川投顧語錄**\n\n"{random.choice(ROASTS)}"'
 
+def get_latest_price(sid):
+    """抓單股最新收盤價"""
+    ym = tw_now().strftime('%Y%m')
+    r  = sb.safe_get(
+        'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
+        params={'response': 'csv', 'date': ym + '01', 'stockNo': sid},
+        timeout=15, retries=2, wait=5
+    )
+    if r is None or '查詢無資料' in r.text:
+        return None
+    try:
+        import pandas as pd
+        text = r.text
+        idx  = text.find('"日期"')
+        if idx == -1:
+            for yr in ['115/', '114/', '113/']:
+                idx = text.find(yr)
+                if idx != -1:
+                    idx = text.rfind('\n', 0, idx) + 1
+                    break
+        if idx == -1:
+            return None
+        df = sb.safe_read_csv(text[idx:], f'LP-{sid}', min_cols=7)
+        df = df[df.iloc[:, 0].astype(str).str.match(r'^\d{3}/\d{2}/\d{2}$', na=False)]
+        if df.empty:
+            return None
+        return float(str(df.iloc[-1, 6]).replace(',', ''))
+    except:
+        return None
+
 def cmd_holding(uid, uname):
     holdings = db['holdings'].get(uid, [])
     if not holdings:
         return f'💼 **{uname} 的持倉**\n\n目前尚無持倉記錄。使用 `/buy` 記錄買入。'
     lines = [f'💼 **{uname} 的持倉**\n']
-    total_cost = 0
+    total_cost   = 0
+    total_mkt    = 0
+    total_unreal = 0
     for h in holdings:
-        cost = h['price'] * h['lots'] * 1000
+        cost    = h['price'] * h['lots'] * 1000
+        cur     = get_latest_price(h['sid'])
+        if cur:
+            mkt     = cur * h['lots'] * 1000
+            unreal  = mkt - cost
+            sign    = '+' if unreal >= 0 else ''
+            emoji   = '🟢' if unreal >= 0 else '🔴'
+            pct     = (cur - h['price']) / h['price'] * 100
+            cur_str = f'{cur:,.1f} 元　{emoji} {sign}{unreal:,.0f}（{sign}{pct:.1f}%）'
+            total_mkt    += mkt
+            total_unreal += unreal
+        else:
+            cur_str = '（無法取得最新價格）'
         total_cost += cost
         lines.append(
-            f'**{h["sid"]}**　{h["price"]} 元 × {h["lots"]} 張'
-            f'　成本 {cost:,.0f} 元　（{h["date"]}）'
+            f'**{h["sid"]}**　成本 {h["price"]} 元 × {h["lots"]} 張\n'
+            f'　　　現價 {cur_str}\n'
+            f'　　　買入日：{h["date"]}'
         )
-    lines.append(f'\n總成本：**{total_cost:,.0f} 元**')
+    sign_total = '+' if total_unreal >= 0 else ''
+    emoji_total = '🟢' if total_unreal >= 0 else '🔴'
+    lines.append(
+        f'\n━━━━━━━━━━━━━━━━\n'
+        f'總成本：**{total_cost:,.0f} 元**\n'
+        f'市值：**{total_mkt:,.0f} 元**\n'
+        f'{emoji_total} 未實現損益：**{sign_total}{total_unreal:,.0f} 元**'
+    )
     return '\n'.join(lines)
 
 def cmd_buy(uid, uname, sid, price, lots):
@@ -505,7 +602,12 @@ def cmd_challenge(uid, uname, sid):
     if start_price is None:
         return f'❌ 無法取得 {sid} 的最新價格，請確認股票代號是否正確。'
 
-    end_date = (tw_now() + timedelta(days=7)).strftime('%Y/%m/%d')
+    # 找下一個週五作為結算日
+    now_d    = tw_now().date()
+    days_to_fri = (4 - now_d.weekday()) % 7
+    if days_to_fri == 0:
+        days_to_fri = 7  # 今天就是週五，算下週五
+    end_date = (now_d + timedelta(days=days_to_fri)).strftime('%Y/%m/%d')
     db['challenges'][uid][week_key] = {
         'sid': sid, 'start_price': start_price, 'end_date': end_date
     }
@@ -634,7 +736,15 @@ class InteractionHandler(BaseHTTPRequestHandler):
                 self.send_json(200, {'type': 4, 'data': {'content': cmd_roast()}}); return
 
             if cmd == 'holding':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_holding(uid, uname)}}); return
+                self.send_json(200, {'type': 5})
+                def _holding_bg():
+                    import requests as req
+                    followup = f'https://discord.com/api/v10/webhooks/{APP_ID}/{token}/messages/@original'
+                    req.patch(followup, json={'content': '💼 正在查詢持倉與最新股價...'}, timeout=10)
+                    result = cmd_holding(uid, uname)
+                    req.patch(followup, json={'content': result}, timeout=10)
+                threading.Thread(target=_holding_bg, daemon=True).start()
+                return
 
             if cmd == 'buy':
                 sid, price, lots = get_opt(opts,'code'), get_opt(opts,'price'), get_opt(opts,'lots')
@@ -710,6 +820,58 @@ class InteractionHandler(BaseHTTPRequestHandler):
 # ══════════════════════════════════════════════════════
 # 內建排程
 # ══════════════════════════════════════════════════════
+def settle_challenge():
+    """週五 21:00 自動結算本週挑戰"""
+    import requests as req
+    webhook = os.environ.get('DISCORD_WEBHOOK', '')
+    if not webhook:
+        return
+
+    now      = tw_now()
+    week_key = now.strftime('%Y-W%W')
+    results  = []
+
+    for uid, weeks in db['challenges'].items():
+        if week_key not in weeks:
+            continue
+        ch  = weeks[week_key]
+        cur = get_latest_price(ch['sid'])
+        if cur is None:
+            continue
+        start = ch['start_price']
+        pct   = round((cur - start) / start * 100, 2)
+        results.append({'uid': uid, 'sid': ch['sid'],
+                         'start': start, 'cur': cur, 'pct': pct})
+
+    if not results:
+        req.post(webhook, json={'content': '⚔️ **本週選股挑戰結算**\n\n本週無人參賽。'}, timeout=10)
+        return
+
+    results.sort(key=lambda x: x['pct'], reverse=True)
+    medals = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
+    lines  = ['⚔️ **本週選股挑戰結算！**\n']
+    for i, r in enumerate(results):
+        sign  = '+' if r['pct'] >= 0 else ''
+        emoji = '🟢' if r['pct'] >= 0 else '🔴'
+        medal = medals[i] if i < len(medals) else f'{i+1}.' 
+        lines.append(
+            f'{medal} <@{r["uid"]}> **{r["sid"]}**\n'
+            f'   起始 {r["start"]:,.1f} → 現價 {r["cur"]:,.1f} 元\n'
+            f'   {emoji} {sign}{r["pct"]}%'
+        )
+
+    winner = results[0]
+    lines.append(f'\n🏆 本週冠軍：<@{winner["uid"]}> 的 **{winner["sid"]}**，報酬率 {("+" if winner["pct"]>=0 else "")}{winner["pct"]}%！')
+    lines.append('\n⚔️ 下週挑戰已重置，歡迎用 `/challenge` 繼續參賽！')
+    req.post(webhook, json={'content': '\n'.join(lines)}, timeout=10)
+
+    # 結算後清零本週所有挑戰
+    for uid in list(db['challenges'].keys()):
+        if week_key in db['challenges'][uid]:
+            del db['challenges'][uid][week_key]
+    save_data(db)
+    print(f"[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽")
+
 def scheduler():
     fired = set()
     while True:
@@ -727,6 +889,12 @@ def scheduler():
                 fired.add(k)
                 os.environ['RUN_MODE'] = 'auto'
                 threading.Thread(target=sb.run_analysis, daemon=True).start()
+        # 週五（weekday=4）21:00 自動結算挑戰
+        if wd == 4 and h == 21 and mn == 0:
+            k = (now.date(), 'challenge_settle')
+            if k not in fired:
+                fired.add(k)
+                threading.Thread(target=settle_challenge, daemon=True).start()
         if h == 0 and mn == 1:
             cutoff = now.date() - timedelta(days=7)
             fired  = {k for k in fired if k[0] >= cutoff}
