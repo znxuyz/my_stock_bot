@@ -85,6 +85,14 @@ def get_user(body):
     name   = user.get('global_name') or user.get('username', '匿名')
     return uid, name
 
+def get_guild(body):
+    return body.get('guild_id', 'dm')
+
+def is_admin(body):
+    """檢查是否為伺服器管理員（MANAGE_GUILD 權限）"""
+    perms = int(body.get('member', {}).get('permissions', 0))
+    return bool(perms & 0x20)  # MANAGE_GUILD bit
+
 # ══════════════════════════════════════════════════════
 # /stock 個股分析
 # ══════════════════════════════════════════════════════
@@ -430,6 +438,9 @@ def cmd_fortune():
 def cmd_roast():
     return f'🗣️ **川投顧語錄**\n\n"{random.choice(ROASTS)}"'
 
+def get_guild_id_from_body(body):
+    return body.get('guild_id', 'dm')
+
 def get_latest_price(sid):
     """抓單股最新收盤價"""
     ym = tw_now().strftime('%Y%m')
@@ -460,23 +471,23 @@ def get_latest_price(sid):
     except:
         return None
 
-def cmd_holding(uid, uname):
-    holdings = db['holdings'].get(uid, [])
+def cmd_holding(uid, uname, guild_id='dm'):
+    if not _DB_OK:
+        return '❌ 資料庫未連接。'
+    holdings = _db.get_holdings(guild_id, uid)
     if not holdings:
         return f'💼 **{uname} 的持倉**\n\n目前尚無持倉記錄。'
-    lines = [f'💼 **{view_name} 的持倉**\n']
-    total_cost   = 0
-    total_mkt    = 0
-    total_unreal = 0
+    lines = [f'💼 **{uname} 的持倉**\n']
+    total_cost = total_mkt = total_unreal = 0
     for h in holdings:
-        cost    = h['price'] * h['lots']
-        cur     = get_latest_price(h['sid'])
+        cost = float(h['price']) * int(h['shares'])
+        cur  = get_latest_price(h['sid'])
         if cur:
-            mkt     = cur * h['lots']
-            unreal  = mkt - cost
-            sign    = '+' if unreal >= 0 else ''
-            emoji   = '🟢' if unreal >= 0 else '🔴'
-            pct     = (cur - h['price']) / h['price'] * 100
+            mkt    = cur * int(h['shares'])
+            unreal = mkt - cost
+            sign   = '+' if unreal >= 0 else ''
+            emoji  = '🟢' if unreal >= 0 else '🔴'
+            pct    = (cur - float(h['price'])) / float(h['price']) * 100
             cur_str = f'{cur:,.1f} 元　{emoji} {sign}{unreal:,.0f}（{sign}{pct:.1f}%）'
             total_mkt    += mkt
             total_unreal += unreal
@@ -484,87 +495,70 @@ def cmd_holding(uid, uname):
             cur_str = '（無法取得最新價格）'
         total_cost += cost
         lines.append(
-            f'**{h["sid"]}**　成本 {h["price"]} 元 × {h["lots"]:,} 股\n'
+            f'**{h["sid"]}**　成本 {float(h["price"]):,.1f} 元 × {int(h["shares"]):,} 股\n'
             f'　　　現價 {cur_str}\n'
-            f'　　　買入日：{h["date"]}'
+            f'　　　買入日：{h["buy_date"]}'
         )
-    sign_total = '+' if total_unreal >= 0 else ''
-    emoji_total = '🟢' if total_unreal >= 0 else '🔴'
+    st = '+' if total_unreal >= 0 else ''
+    et = '🟢' if total_unreal >= 0 else '🔴'
     lines.append(
         f'\n━━━━━━━━━━━━━━━━\n'
         f'總成本：**{total_cost:,.0f} 元**\n'
         f'市值：**{total_mkt:,.0f} 元**\n'
-        f'{emoji_total} 未實現損益：**{sign_total}{total_unreal:,.0f} 元**'
+        f'{et} 未實現損益：**{st}{total_unreal:,.0f} 元**'
     )
+    total_pnl = _db.get_pnl(guild_id, uid)
+    sp = '+' if total_pnl >= 0 else ''
+    lines.append(f'💰 已實現損益：**{sp}{total_pnl:,.0f} 元**')
     return '\n'.join(lines)
 
-def cmd_buy(uid, uname, sid, price, lots):
+
+def cmd_buy(uid, uname, sid, price, shares, guild_id='dm'):
+    if not _DB_OK:
+        return '❌ 資料庫未連接。'
     sid = sid.strip().upper()
-    entry = {'sid': sid, 'price': price, 'lots': lots,
-             'date': tw_now().strftime('%Y/%m/%d')}
-    if uid not in db['holdings']:
-        db['holdings'][uid] = []
-    db['holdings'][uid].append(entry)
-    if uid not in db['trades']:
-        db['trades'][uid] = []
-    db['trades'][uid].append({**entry, 'action': 'buy'})
-    save_data(db)
-    cost = price * lots
-    return (
-        f'🛒 **買入記錄成功**\n'
-        f'股票：{sid}　價格：{price} 元　股數：{lots:,} 股\n'
-        f'投入金額：**{cost:,.0f} 元**'
-    )
+    try:
+        _db.add_holding(guild_id, uid, sid, price, int(shares), tw_now().date())
+        cost = price * int(shares)
+        return (
+            f'🛒 **買入記錄成功**\n'
+            f'股票：{sid}　價格：{price} 元　股數：{int(shares):,} 股\n'
+            f'投入金額：**{cost:,.0f} 元**'
+        )
+    except Exception as e:
+        return f'❌ 記錄失敗：{e}'
 
-def cmd_sell(uid, uname, sid, price, lots):
-    sid      = sid.strip().upper()
-    holdings = db['holdings'].get(uid, [])
-    owned    = [h for h in holdings if h['sid'] == sid]
-    if not owned:
-        return f'❌ 你的持倉中沒有 {sid}，請先用 `/buy` 記錄買入。'
-
-    # FIFO 計算損益
-    sold_lots = lots
-    realized  = 0.0
-    remaining = []
-    for h in holdings:
-        if h['sid'] != sid or sold_lots <= 0:
-            remaining.append(h)
-            continue
-        take = min(sold_lots, h['lots'])
-        realized  += (price - h['price']) * take
-        sold_lots -= take
-        if h['lots'] > take:
-            remaining.append({**h, 'lots': h['lots'] - take})
-
-    db['holdings'][uid] = remaining
-    if uid not in db['trades']:
-        db['trades'][uid] = []
-    db['trades'][uid].append({'sid': sid, 'price': price, 'lots': lots,
-                               'action': 'sell', 'pnl': realized,
-                               'date': tw_now().strftime('%Y/%m/%d')})
-    db['pnl'][uid] = db['pnl'].get(uid, 0.0) + realized
-    save_data(db)
-
+def cmd_sell(uid, uname, sid, price, shares, guild_id='dm'):
+    if not _DB_OK:
+        return '❌ 資料庫未連接。'
+    sid = sid.strip().upper()
+    realized, err = _db.remove_holding(guild_id, uid, sid, price, int(shares))
+    if err:
+        return f'❌ {err}'
+    total_pnl = _db.get_pnl(guild_id, uid)
     emoji = '🟢' if realized >= 0 else '🔴'
     sign  = '+' if realized >= 0 else ''
+    sp    = '+' if total_pnl >= 0 else ''
     return (
         f'💸 **賣出記錄成功**\n'
-        f'股票：{sid}　價格：{price} 元　股數：{lots:,} 股\n'
+        f'股票：{sid}　價格：{price} 元　股數：{int(shares):,} 股\n'
         f'{emoji} 本次損益：**{sign}{realized:,.0f} 元**\n'
-        f'累計損益：**{sign}{db["pnl"][uid]:,.0f} 元**'
+        f'累計損益：**{sp}{total_pnl:,.0f} 元**'
     )
 
-def cmd_leaderboard():
-    pnl = db.get('pnl', {})
-    if not pnl:
+def cmd_leaderboard(guild_id='dm'):
+    if not _DB_OK:
+        return '❌ 資料庫未連接。'
+    rows = _db.get_leaderboard(guild_id)
+    if not rows:
         return '🏆 **損益排行榜**\n\n目前尚無任何交易記錄。'
-    sorted_users = sorted(pnl.items(), key=lambda x: x[1], reverse=True)
-    medals = ['🥇','🥈','🥉','4️⃣','5️⃣']
+    medals = ['🥇','🥈','🥉','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟']
     lines  = ['🏆 **損益排行榜**\n']
-    for i, (uid, total) in enumerate(sorted_users[:5]):
-        sign = '+' if total >= 0 else ''
-        lines.append(f'{medals[i]} <@{uid}>　{sign}{total:,.0f} 元')
+    for i, row in enumerate(rows):
+        total = float(row['total_pnl'])
+        sign  = '+' if total >= 0 else ''
+        medal = medals[i] if i < len(medals) else f'{i+1}.'
+        lines.append(f'{medal} <@{row["user_id"]}>　{sign}{total:,.0f} 元')
     return '\n'.join(lines)
 
 def cmd_poll(question, opt1, opt2):
@@ -575,17 +569,18 @@ def cmd_poll(question, opt1, opt2):
         f'請點下方表情回應投票！（🅰️ 或 🅱️）'
     )
 
-def cmd_challenge(uid, uname, sid):
+def cmd_challenge(uid, uname, sid, guild_id='dm'):
     sid = sid.strip().upper()
     week_key = tw_now().strftime('%Y-W%W')
-    if uid not in db['challenges']:
-        db['challenges'][uid] = {}
+    if _DB_OK:
+        existing = _db.get_challenge(guild_id, uid, week_key)
+    else:
+        existing = None
 
-    if week_key in db['challenges'][uid]:
-        existing = db['challenges'][uid][week_key]
+    if existing:
         return (
             f'⚔️ 你本週已提交挑戰股票：**{existing["sid"]}**\n'
-            f'起始價格：{existing["start_price"]} 元\n'
+            f'起始價格：{float(existing["start_price"]):,.1f} 元\n'
             f'挑戰截止：{existing["end_date"]}'
         )
 
@@ -624,17 +619,14 @@ def cmd_challenge(uid, uname, sid):
     if days_to_fri == 0:
         days_to_fri = 7  # 今天就是週五，算下週五
     end_date = (now_d + timedelta(days=days_to_fri)).strftime('%Y/%m/%d')
-    db['challenges'][uid][week_key] = {
-        'sid': sid, 'start_price': start_price, 'end_date': end_date
-    }
-    save_data(db)
+    if _DB_OK:
+        _db.add_challenge(guild_id, uid, week_key, sid, start_price, end_date)
 
     # 顯示本週所有挑戰
     all_ch = []
-    for u, weeks in db['challenges'].items():
-        if week_key in weeks:
-            ch = weeks[week_key]
-            all_ch.append(f'<@{u}>　**{ch["sid"]}**　起始 {ch["start_price"]} 元')
+    if _DB_OK:
+        for ch in _db.get_all_challenges(guild_id, week_key):
+            all_ch.append(f'<@{ch["user_id"]}>　**{ch["sid"]}**　起始 {float(ch["start_price"]):,.1f} 元')
 
     lines = [
         f'⚔️ **本週選股挑戰**\n',
@@ -689,6 +681,11 @@ def register_commands():
              {'name': 'option2',  'description': '選項二',   'type': 3, 'required': True},
          ]},
         {'name': 'leaderboard', 'description': '🏆 查看伺服器成員損益排行榜'},
+        {'name': 'setup', 'description': '⚙️ 設定本伺服器的分析推播頻道（僅管理員）',
+         'options': [
+             {'name': 'webhook', 'description': 'Webhook URL（輸入 remove 可移除）',
+              'type': 3, 'required': True}
+         ]},
         {'name': 'report',    'description': '📊 查看最近結算報告與累積勝率統計'},
         {'name': 'stats',     'description': '📈 查看詳細統計與篩選邏輯修正建議'},
         {'name': 'challenge',   'description': '⚔️ 提交本週選股挑戰，一週後比誰獲利高',
@@ -778,32 +775,72 @@ class InteractionHandler(BaseHTTPRequestHandler):
                         h_name = f'用戶{tid}'
 
                 # 明確傳入參數避免 closure 捕捉問題
-                def _holding_bg(_h_uid=h_uid, _h_name=h_name, _self_uid=uid, _self_name=uname):
+                _g_id = get_guild(body)
+                def _holding_bg(_h_uid=h_uid, _h_name=h_name, _self_uid=uid, _g=_g_id):
                     import requests as req
                     followup = f'https://discord.com/api/v10/webhooks/{APP_ID}/{token}/messages/@original'
                     label = f'**{_h_name}**' if _h_uid != _self_uid else '你'
                     req.patch(followup, json={'content': f'💼 正在查詢 {label} 的持倉...'}, timeout=10)
-                    result = cmd_holding(_h_uid, _h_name)
+                    result = cmd_holding(_h_uid, _h_name, _g)
                     req.patch(followup, json={'content': result}, timeout=10)
                 threading.Thread(target=_holding_bg, daemon=True).start()
                 return
 
             if cmd == 'buy':
                 sid, price, lots = get_opt(opts,'code'), get_opt(opts,'price'), get_opt(opts,'lots')
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_buy(uid, uname, sid, price, lots)}}); return
+                self.send_json(200, {'type': 4, 'data': {'content': cmd_buy(uid, uname, sid, price, lots, get_guild(body))}}); return
 
             if cmd == 'sell':
                 sid, price, lots = get_opt(opts,'code'), get_opt(opts,'price'), get_opt(opts,'lots')
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_sell(uid, uname, sid, price, lots)}}); return
+                self.send_json(200, {'type': 4, 'data': {'content': cmd_sell(uid, uname, sid, price, lots, get_guild(body))}}); return
 
             if cmd == 'leaderboard':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_leaderboard()}}); return
+                self.send_json(200, {'type': 4, 'data': {'content': cmd_leaderboard(get_guild(body))}}); return
+
+            if cmd == 'setup':
+                if not is_admin(body):
+                    self.send_json(200, {'type': 4, 'data': {
+                        'content': '❌ 只有伺服器管理員才能使用 `/setup`。',
+                        'flags': 64
+                    }}); return
+                webhook_input = get_opt(opts, 'webhook', '').strip()
+                guild_id_setup = get_guild(body)
+                if webhook_input.lower() == 'remove':
+                    if _DB_OK:
+                        _db.remove_guild(guild_id_setup)
+                    self.send_json(200, {'type': 4, 'data': {
+                        'content': '✅ 已移除本伺服器的推播設定。',
+                        'flags': 64
+                    }}); return
+                # 測試 webhook
+                import requests as req
+                try:
+                    test_msg = '✅ **川投顧量化系統** 設定成功！\n每日 17:00 盤後分析、07:00 盤前複習將自動推播至此頻道。'
+                    r = req.post(webhook_input, json={'content': test_msg}, timeout=10)
+                    if r.status_code in (200, 204):
+                        if _DB_OK:
+                            _db.set_guild_webhook(guild_id_setup, webhook_input, uid)
+                        self.send_json(200, {'type': 4, 'data': {
+                            'content': '✅ 設定成功！測試訊息已發送至目標頻道。',
+                            'flags': 64
+                        }})
+                    else:
+                        self.send_json(200, {'type': 4, 'data': {
+                            'content': f'❌ Webhook 測試失敗（{r.status_code}），請確認 URL 是否正確。',
+                            'flags': 64
+                        }})
+                except Exception as e:
+                    self.send_json(200, {'type': 4, 'data': {
+                        'content': f'❌ 無法連接 Webhook：{e}',
+                        'flags': 64
+                    }})
+                return
 
             if cmd == 'report':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_report()}}); return
+                self.send_json(200, {'type': 4, 'data': {'content': cmd_report(get_guild(body))}}); return
 
             if cmd == 'stats':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_stats()}}); return
+                self.send_json(200, {'type': 4, 'data': {'content': cmd_stats(get_guild(body))}}); return
 
             if cmd == 'poll':
                 q, o1, o2 = get_opt(opts,'question'), get_opt(opts,'option1'), get_opt(opts,'option2')
@@ -857,7 +894,7 @@ class InteractionHandler(BaseHTTPRequestHandler):
                     elif cmd == 'challenge':
                         sid = get_opt(opts, 'code', '')
                         req.patch(followup, json={'content': f'⚔️ 正在查詢 {sid} 最新股價...'}, timeout=10)
-                        result = cmd_challenge(uid, uname, sid)
+                        result = cmd_challenge(uid, uname, sid, get_guild(body))
                         req.patch(followup, json={'content': result}, timeout=10)
 
                 threading.Thread(target=bg, daemon=True).start()
@@ -868,7 +905,7 @@ class InteractionHandler(BaseHTTPRequestHandler):
 # ══════════════════════════════════════════════════════
 # 內建排程
 # ══════════════════════════════════════════════════════
-def settle_weekly(settle_date, round_num):
+def settle_weekly(settle_date, round_num, guild_id='default'):
     """
     結算 settle_date 這天到期的第 round_num 次結算。
     自動抓每支股票最新收盤、計算報酬率、寫回DB、發送報告。
@@ -878,7 +915,7 @@ def settle_weekly(settle_date, round_num):
     if not webhook or not _DB_OK:
         return
 
-    records = _db.get_pending_settle(settle_date, round_num)
+    records = _db.get_pending_settle(settle_date, round_num, guild_id)
     if not records:
         print(f"[結算] {settle_date} 第{round_num}次：無待結算記錄")
         return
@@ -960,8 +997,8 @@ def settle_weekly(settle_date, round_num):
     ]
 
     # 邏輯檢討
-    grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats()
-    total_n = _db.get_total_screened()
+    grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats(guild_id)
+    total_n = _db.get_total_screened(guild_id)
     lines.append('━━━━━━━━━━━━━━━━━━━━')
     lines.append(f'🔍 **邏輯檢討**（累積 {total_n} 筆）')
 
@@ -1034,19 +1071,21 @@ def settle_weekly(settle_date, round_num):
         buf += line
     if buf:
         chunks.append(buf)
+    guild_wh = _db.get_guild_webhook(guild_id) if _DB_OK else webhook
+    send_wh  = guild_wh or webhook
     for chunk in chunks:
-        req.post(webhook, json={'content': chunk}, timeout=15)
+        req.post(send_wh, json={'content': chunk}, timeout=15)
         time.sleep(0.5)
 
     print(f"[結算] {settle_date} 第{round_num}次結算完成，{len(results)} 筆")
 
-def cmd_report():
+def cmd_report(guild_id='dm'):
     """取得最近一次結算的報告摘要"""
     if not _DB_OK:
         return '❌ 資料庫未連接。'
     try:
-        grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats()
-        total_n = _db.get_total_screened()
+        grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats(guild_id)
+        total_n = _db.get_total_screened(guild_id)
         if total_n == 0:
             return 'ℹ️ 尚無任何篩選記錄，等每日分析跑完後才會有資料。'
         lines = [f'📊 **累積統計（共 {total_n} 筆）**\n']
@@ -1072,13 +1111,13 @@ def cmd_report():
     except Exception as e:
         return f'❌ 查詢失敗：{e}'
 
-def cmd_stats():
+def cmd_stats(guild_id='dm'):
     """詳細統計 + 修正建議"""
     if not _DB_OK:
         return '❌ 資料庫未連接。'
     try:
-        grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats()
-        total_n = _db.get_total_screened()
+        grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats(guild_id)
+        total_n = _db.get_total_screened(guild_id)
         if total_n == 0:
             return 'ℹ️ 尚無任何篩選記錄。'
         lines = [f'📈 **詳細統計（累積 {total_n} 筆）**\n']
@@ -1127,17 +1166,30 @@ def settle_challenge():
     week_key = now.strftime('%Y-W%W')
     results  = []
 
-    for uid, weeks in db['challenges'].items():
-        if week_key not in weeks:
-            continue
-        ch  = weeks[week_key]
-        cur = get_latest_price(ch['sid'])
-        if cur is None:
-            continue
-        start = ch['start_price']
-        pct   = round((cur - start) / start * 100, 2)
-        results.append({'uid': uid, 'sid': ch['sid'],
-                         'start': start, 'cur': cur, 'pct': pct})
+    if _DB_OK:
+        guilds = _db.get_all_webhooks()
+    else:
+        guilds = []
+
+    for gw in guilds:
+        g_id = gw['guild_id']
+        g_wh = gw['webhook_url']
+        g_results = []
+        for ch in _db.get_all_challenges(g_id, week_key):
+            cur = get_latest_price(ch['sid'])
+            if cur is None:
+                continue
+            start = float(ch['start_price'])
+            pct   = round((cur - start) / start * 100, 2)
+            g_results.append({'uid': ch['user_id'], 'sid': ch['sid'],
+                               'start': start, 'cur': cur, 'pct': pct,
+                               'webhook': g_wh, 'guild_id': g_id})
+        results.extend(g_results)
+
+    if not results:
+        if webhook:
+            req.post(webhook, json={'content': '⚔️ **本週選股挑戰結算**\n\n本週無人參賽。'}, timeout=10)
+        return
 
     if not results:
         req.post(webhook, json={'content': '⚔️ **本週選股挑戰結算**\n\n本週無人參賽。'}, timeout=10)
@@ -1162,10 +1214,9 @@ def settle_challenge():
     req.post(webhook, json={'content': '\n'.join(lines)}, timeout=10)
 
     # 結算後清零本週所有挑戰
-    for uid in list(db['challenges'].keys()):
-        if week_key in db['challenges'][uid]:
-            del db['challenges'][uid][week_key]
-    save_data(db)
+    if _DB_OK:
+        for gw in _db.get_all_webhooks():
+            _db.clear_challenges(gw['guild_id'], week_key)
     print(f"[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽")
 
 def scheduler():
@@ -1191,9 +1242,13 @@ def scheduler():
             if k not in fired:
                 fired.add(k)
                 def _do_settle(_d=now.date()):
-                    settle_weekly(_d, 1)
-                    time.sleep(2)
-                    settle_weekly(_d, 2)
+                    if _DB_OK:
+                        guilds = _db.get_all_webhooks()
+                        for gw in guilds:
+                            settle_weekly(_d, 1, gw['guild_id'])
+                            time.sleep(1)
+                            settle_weekly(_d, 2, gw['guild_id'])
+                            time.sleep(1)
                 threading.Thread(target=_do_settle, daemon=True).start()
         # 週五（weekday=4）21:00 自動結算挑戰
         if wd == 4 and h == 21 and mn == 0:
