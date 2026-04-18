@@ -840,10 +840,34 @@ class InteractionHandler(BaseHTTPRequestHandler):
                 return
 
             if cmd == 'report':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_report(get_guild(body))}}); return
+                self.send_json(200, {'type': 5})
+                _g = get_guild(body)
+                _tk = token
+                def _report_bg(_g=_g, _tk=_tk):
+                    import requests as req
+                    followup = f'https://discord.com/api/v10/webhooks/{APP_ID}/{_tk}/messages/@original'
+                    try:
+                        result = cmd_report(_g)
+                    except Exception as e:
+                        result = f'❌ 查詢失敗：{e}'
+                    req.patch(followup, json={'content': result or 'ℹ️ 尚無結算記錄。'}, timeout=10)
+                threading.Thread(target=_report_bg, daemon=True).start()
+                return
 
             if cmd == 'stats':
-                self.send_json(200, {'type': 4, 'data': {'content': cmd_stats(get_guild(body))}}); return
+                self.send_json(200, {'type': 5})
+                _g = get_guild(body)
+                _tk = token
+                def _stats_bg(_g=_g, _tk=_tk):
+                    import requests as req
+                    followup = f'https://discord.com/api/v10/webhooks/{APP_ID}/{_tk}/messages/@original'
+                    try:
+                        result = cmd_stats(_g)
+                    except Exception as e:
+                        result = f'❌ 查詢失敗：{e}'
+                    req.patch(followup, json={'content': result or 'ℹ️ 尚無統計資料。'}, timeout=10)
+                threading.Thread(target=_stats_bg, daemon=True).start()
+                return
 
             if cmd == 'poll':
                 q, o1, o2 = get_opt(opts,'question'), get_opt(opts,'option1'), get_opt(opts,'option2')
