@@ -1112,7 +1112,8 @@ def cmd_report(guild_id='dm'):
                 lines.append(f'  {b["bias_zone"]}：{wr}%　平均 {s}{ar}%')
         return '\n'.join(lines)
     except Exception as e:
-        return f'❌ 查詢失敗：{e}'
+        import traceback
+        return f'❌ 查詢失敗：{e}\n```\n{traceback.format_exc()[-500:]}\n```'
 
 def cmd_stats(guild_id='dm'):
     """詳細統計 + 修正建議"""
@@ -1229,12 +1230,6 @@ def scheduler():
         h, wd, mn = now.hour, now.weekday(), now.minute
         if wd < 5 and h == 17 and mn == 0:
             k = (now.date(), 'close')
-            if k not in fired:
-                fired.add(k)
-                os.environ['RUN_MODE'] = 'auto'
-                threading.Thread(target=sb.run_analysis, daemon=True).start()
-        if 0 < wd <= 5 and h == 7 and mn == 0:
-            k = (now.date(), 'preview')
             if k not in fired:
                 fired.add(k)
                 os.environ['RUN_MODE'] = 'auto'
