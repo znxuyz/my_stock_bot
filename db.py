@@ -293,15 +293,15 @@ def get_cumulative_stats(guild_id):
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(grade_sql, (guild_id,))
-                grade_rows = cur.fetchall()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                grade_rows = list(cur.fetchall())
                 cur.execute(bias_sql, (guild_id,))
-                bias_rows = cur.fetchall()
-            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                bias_rows = list(cur.fetchall())
                 cur.execute(dual_sql, (guild_id,))
-                dual_rows = cur.fetchall()
+                dual_rows = list(cur.fetchall())
+        conn.close()
     except Exception as e:
-        print(f"[DB] get_cumulative_stats 錯誤：{e}")
+        import traceback
+        print(f"[DB] get_cumulative_stats 錯誤：{e}\n{traceback.format_exc()}")
     return grade_rows, bias_rows, dual_rows
 
 def get_total_screened(guild_id):
