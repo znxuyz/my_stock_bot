@@ -288,11 +288,20 @@ def get_cumulative_stats(guild_id):
     WHERE guild_id = %s AND settle1_done = TRUE
     GROUP BY buy_type
     """
-    with get_conn() as conn:
-        with conn.cursor(cursor_factory=RealDictCursor) as cur:
-            cur.execute(grade_sql, (guild_id,)); grade_rows = cur.fetchall()
-            cur.execute(bias_sql,  (guild_id,)); bias_rows  = cur.fetchall()
-            cur.execute(dual_sql,  (guild_id,)); dual_rows  = cur.fetchall()
+    grade_rows, bias_rows, dual_rows = [], [], []
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(grade_sql, (guild_id,))
+                grade_rows = cur.fetchall()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(bias_sql, (guild_id,))
+                bias_rows = cur.fetchall()
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(dual_sql, (guild_id,))
+                dual_rows = cur.fetchall()
+    except Exception as e:
+        print(f"[DB] get_cumulative_stats 錯誤：{e}")
     return grade_rows, bias_rows, dual_rows
 
 def get_total_screened(guild_id):
