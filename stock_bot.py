@@ -595,6 +595,79 @@ def calc_score(entry):
 
     return min(100, score)
 
+
+def generate_advice(entry):
+    """根據各指標生成新手易懂的綜合建議"""
+    b   = entry.get('bias') or {}
+    adv = entry.get('adv') or {}
+    score = entry.get('score', 0)
+
+    lines = ['\n💬 **綜合說明（新手參考）**']
+
+    # 乖離率說明
+    bp = b.get('bias_pct')
+    if bp is not None:
+        if bp > 8:
+            lines.append('⚠️ 短線漲太快，現在追進去風險高，建議等回調再看。')
+        elif bp > 5:
+            lines.append('📌 股價略高於均線，可小量觀察，不建議重壓。')
+        elif bp >= 0:
+            lines.append('✅ 股價貼近均線，是相對安全的進場位置。')
+        else:
+            lines.append('🔄 股價低於均線，若法人持續買進可能是底部機會。')
+
+    # RSI 說明
+    rsi = adv.get('rsi')
+    if rsi:
+        if rsi > 80:
+            lines.append(f'📊 RSI {rsi}，動能極強但短線可能過熱，留意拉回。')
+        elif rsi > 60:
+            lines.append(f'📊 RSI {rsi}，動能健康，趨勢向上。')
+        elif rsi > 50:
+            lines.append(f'📊 RSI {rsi}，動能普通，需要更多觀察。')
+        else:
+            lines.append(f'📊 RSI {rsi}，動能偏弱，法人買超是主要支撐。')
+
+    # 壓力位說明
+    rl = adv.get('resistance_label', '')
+    if '接近' in rl:
+        lines.append('🏔 股價靠近歷史高點，可能遇到賣壓，分批操作較安全。')
+    elif '無明顯' in rl:
+        lines.append('🏔 上方無明顯壓力，空間相對充裕。')
+
+    # 位階說明
+    pl = adv.get('position_label', '')
+    if '極高' in pl:
+        lines.append('📍 這支股票從低點算起已漲很多，追高要特別謹慎。')
+    elif '偏高' in pl:
+        lines.append('📍 股價位階偏高，建議控制倉位不要太重。')
+    elif '剛起漲' in pl:
+        lines.append('📍 股價剛從低點起來，還有上漲空間。')
+
+    # OBV 說明
+    ol = adv.get('obv_label', '')
+    if '背離' in ol:
+        lines.append('📦 成交量沒有跟上股價，漲勢可能後繼無力，小心。')
+    elif '同步' in ol:
+        lines.append('📦 成交量配合股價上漲，是健康的上漲。')
+    elif '量縮' in ol:
+        lines.append('📦 量能在縮小，動能有減弱的跡象。')
+
+    # 停損說明
+    atr_stop = adv.get('atr_stop')
+    if atr_stop:
+        lines.append(f'⛔ 建議停損設在 {atr_stop:,.1f} 元，跌破就出場，不要凹單。')
+
+    # 綜合結論
+    if score >= 80:
+        lines.append('\n🎯 **結論：強力關注，各項指標多數達標，可考慮進場布局。**')
+    elif score >= 65:
+        lines.append('\n🎯 **結論：值得追蹤，條件不錯但非最佳狀態，小量試水溫。**')
+    else:
+        lines.append('\n🎯 **結論：觀察為主，等待更明確的進場訊號再行動。**')
+
+    return '\n'.join(lines)
+
 def calc_bias_and_entry(df, price):
     """
     計算 10 日乖離率與建議入場價、目標價、停損價。
@@ -946,6 +1019,10 @@ def run_analysis():
                 lines.append(f"📍 位階：{adv['position_label']}")
             if adv.get('obv_label'):
                 lines.append(f"📦 OBV：{adv['obv_label']}")
+            # 綜合說明
+            advice = generate_advice(e)
+            if advice:
+                lines.append(advice)
             lines.append('─' * 25)
             return '\n'.join(lines)
 
