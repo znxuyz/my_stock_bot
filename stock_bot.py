@@ -22,9 +22,9 @@ HEADERS = {
 # 篩選參數 ── 只改這裡就能調整條件
 # ══════════════════════════════════════════════════════════
 MIN_PRICE        = 10      # 1. 收盤價下限（元）
-# 2. 漲跌幅區間：漲幅 >= GRADE_A 或 跌幅 GRADE_X_LO~GRADE_X_HI（程式內判斷）
+# X 級已移除
 MIN_INST_SHARE   = 50000   # 3. 法人合計買超最低股數（50張 = 50,000股）
-MAX_CANDIDATES   = 50      # 4. 候選數量保護上限（取法人買超最多的前N名）
+MAX_CANDIDATES   = 30      # 4. 候選數量保護上限（取法人買超最多的前N名）
 VOLUME_RATIO_MIN = 1.5     # 5. 量比：當日量 ÷ 近5日均量
 # 6. EMA 多頭排列（程式內判斷，含備援邏輯）
 
@@ -38,8 +38,8 @@ EMA_FALLBACK_MIN = 60   # 備援模式最少需要幾筆資料
 GRADE_SS   =  7.0
 GRADE_S    =  3.5
 GRADE_A    =  1.0
-GRADE_X_LO = -1.5   # 縮小 X 級跌幅範圍（原 -3.0），讓 X 級更精準
-GRADE_X_HI =  0.0
+# X 級已移除
+# X 級已移除
 
 # 雙買超門檻：外資和投信各自的最低要求
 MIN_FOREIGN_SHARE      = 10000   # 外資至少 10,000 股
@@ -533,6 +533,68 @@ def calc_advanced_indicators(df, price):
 
     return result
 
+
+def calc_score(entry):
+    """綜合積分（滿分 100），用於取代單純漲幅分級"""
+    score = 0
+
+    # 漲幅（25分）
+    chg = entry.get('change', 0)
+    if   chg >= 7:   score += 25
+    elif chg >= 5:   score += 20
+    elif chg >= 3.5: score += 15
+    elif chg >= 2:   score += 10
+    elif chg >= 1:   score += 5
+
+    # 量比（20分）
+    vr = entry.get('vol_ratio', 0)
+    if   vr >= 3.0: score += 20
+    elif vr >= 2.0: score += 15
+    elif vr >= 1.5: score += 10
+    elif vr >= 1.2: score += 5
+
+    # 法人買超強度（20分）
+    foreign = entry.get('foreign', 0)
+    trust   = entry.get('trust', 0)
+    total   = foreign + trust
+    both    = foreign >= 10000 and trust >= 10000
+    if both and total >= 500000:   score += 20
+    elif both and total >= 100000: score += 15
+    elif both:                     score += 10
+    elif total >= 100000:          score += 8
+    else:                          score += 3
+
+    # 乖離率（15分）
+    b  = entry.get('bias') or {}
+    bp = b.get('bias_pct')
+    if bp is None:         score += 8
+    elif 0 <= bp <= 5:     score += 15
+    elif bp < 0:           score += 10
+    elif bp <= 8:          score += 5
+    # >8% 給 0 分
+
+    # RSI（10分）
+    adv = entry.get('adv') or {}
+    rsi = adv.get('rsi')
+    if rsi is None:        score += 5
+    elif 60 <= rsi <= 80:  score += 10
+    elif rsi > 80:         score += 8
+    elif rsi >= 50:        score += 5
+    # <50 給 0 分
+
+    # 壓力位（5分）
+    rs = adv.get('resistance_score', 0)
+    if rs == 0:            score += 5
+    elif rs == -0.25:      score += 2
+
+    # 位階（5分）
+    ps = adv.get('position_score', 0)
+    if ps >= 0.5:          score += 5
+    elif ps == 0:          score += 3
+    elif ps == -0.5:       score += 1
+
+    return min(100, score)
+
 def calc_bias_and_entry(df, price):
     """
     計算 10 日乖離率與建議入場價、目標價、停損價。
@@ -716,8 +778,8 @@ def run_analysis():
 
                 change = round((diff / (price - diff)) * 100, 2) if (price - diff) != 0 else 0.0
 
-                # 2. 漲跌幅區間
-                if not (change >= GRADE_A or (GRADE_X_LO <= change < GRADE_X_HI)):
+                # 2. 漲幅需 ≥ 1%（X 級已移除）
+                if change < GRADE_A:
                     continue
 
                 inst_row = df_i[df_i['sid_clean'] == sid]
@@ -759,7 +821,7 @@ def run_analysis():
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
         print(f"[EMA] 月份清單：{months}")
 
-        ss_list, s_list, a_list, x_list = [], [], [], []
+        ss_list, s_list, a_list = [], [], []
 
         for idx_c, entry in enumerate(candidates):
             sid = entry['sid']
@@ -795,10 +857,13 @@ def run_analysis():
                 entry['adv'] = adv
                 change = entry['change']
 
-                if   change >= GRADE_SS:                  ss_list.append(entry)
-                elif change >= GRADE_S:                    s_list.append(entry)
-                elif change >= GRADE_A:                    a_list.append(entry)
-                elif GRADE_X_LO <= change < GRADE_X_HI:   x_list.append(entry)
+                # 積分制分級
+                score = calc_score(entry)
+                entry['score'] = score
+                if   score >= 80: ss_list.append(entry)
+                elif score >= 65:  s_list.append(entry)
+                elif score >= 50:  a_list.append(entry)
+                # <50 淘汰，不加入任何列表
 
                 print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ 漲{change}% 量比{vol_ratio:.2f} EMA:{ema_mode} {elapsed:.1f}s")
 
@@ -806,8 +871,7 @@ def run_analysis():
                 print(f"  [{idx_c+1}/{len(candidates)}] {sid} 錯誤：{e}")
 
         for lst in [ss_list, s_list, a_list]:
-            lst.sort(key=lambda e: e['change'], reverse=True)
-        x_list.sort(key=lambda e: e['total'], reverse=True)
+            lst.sort(key=lambda e: e.get('score', 0), reverse=True)
 
         # 寫入資料庫（對所有已設定伺服器各存一份）
         if _DB_OK:
@@ -818,8 +882,7 @@ def run_analysis():
                 for _e, _g in (
                     [(e, 'SS') for e in ss_list] +
                     [(e, 'S')  for e in s_list]  +
-                    [(e, 'A')  for e in a_list]  +
-                    [(e, 'X')  for e in x_list]
+                    [(e, 'A')  for e in a_list]
                 ):
                     _e2 = dict(_e); _e2['grade'] = _g
                     _all.append(_e2)
@@ -848,7 +911,7 @@ def run_analysis():
                 print(f"[DB] 寫入失敗：{_dbe}")
 
         total_elapsed = time.time() - t_start
-        print(f"[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)} X={len(x_list)}，總耗時={total_elapsed:.0f}秒")
+        print(f"[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)}，總耗時={total_elapsed:.0f}秒")
 
         # ══════════════════════════════════════
         # 組裝 Discord 訊息
@@ -858,8 +921,9 @@ def run_analysis():
             ema_tag = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
             b       = e.get('bias')
             adv     = e.get('adv', {})
+            score_str = f"　{e['score']}分" if 'score' in e else ''
             lines   = [
-                f"{emoji_open}【{grade_label}】{e['sid']} {e['name']}{emoji_close}",
+                f"{emoji_open}【{grade_label}{score_str}】{e['sid']} {e['name']}{emoji_close}",
                 f"🔹收盤價格：{e['price']}　漲幅：{sign}{e['change']}%　量比：{e.get('vol_ratio', 0):.1f}x{ema_tag}",
                 f"🔹外資：{fmt_share(e['foreign'])}股　投信：{fmt_share(e['trust'])}股",
             ]
@@ -901,16 +965,13 @@ def run_analysis():
 
         sections = []
         if ss_list:
-            sections += [stock_block(e, '🔥', 'SS 級', '🔥') for e in ss_list[:10]]
+            sections += [stock_block(e, '🔥', 'SS', '🔥') for e in ss_list[:10]]
         if s_list:
-            sections += [stock_block(e, '💎', 'S 級',  '💎') for e in  s_list[:10]]
+            sections += [stock_block(e, '💎', 'S',  '💎') for e in  s_list[:10]]
         if a_list:
-            sections += [stock_block(e, '📈', 'A 級',  '📈') for e in  a_list[:10]]
-        if x_list:
-            sections.append('─── 🔍 潛在起漲區（小跌+法人逆勢買）───')
-            sections += [stock_block(e, '🔍', 'X 級', '🔍') for e in  x_list[:10]]
+            sections += [stock_block(e, '📈', 'A',  '📈') for e in  a_list[:10]]
         if not sections:
-            sections.append('（今日無符合所有條件之標的）')
+            sections.append('（今日無符合條件之標的）')
 
         full_message = header + '\n\n' + '\n\n'.join(sections)
 
