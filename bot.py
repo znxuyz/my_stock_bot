@@ -279,13 +279,17 @@ def analyze_stock(sid):
         f'📝 {rec}\n'
     )
 
-    # 新手說明
-    fake_entry = {'bias': bias, 'adv': adv, 'score': int(stars * 20)}
-    if hasattr(sb, 'generate_advice'):
-        advice = sb.generate_advice(fake_entry)
-        if advice:
-            msg += advice
-
+    msg += (
+        '\n━━━━━━━━━━━━━━━━━━━━━━━━\n'
+        '📖 **指標速查**\n'
+        '📐 乖離率：0~5% 理想　5~8% 略高　>8% 勿追\n'
+        '📊 RSI：60~80 強勢　>80 過熱　<50 動能弱\n'
+        '🏔 壓力位：接近歷史高點時小心賣壓\n'
+        '📍 位階：距低點越遠追高風險越高\n'
+        '📦 OBV：量價同步才是健康的漲\n'
+        '⛔ 動態停損：跌破此價建議出場\n'
+        '━━━━━━━━━━━━━━━━━━━━━━━━'
+    )
     return msg
 
 # ══════════════════════════════════════════════════════
