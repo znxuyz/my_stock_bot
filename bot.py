@@ -236,8 +236,10 @@ def analyze_stock(sid):
         tag   = '（今日）' if i == len(recent)-1 else f'（-{len(recent)-1-i}日）'
         trend_lines.append(f'  {d} {arrow} {c:,.1f} 元 {("+" if ch>=0 else "")}{ch}% {tag}')
 
-    # 乖離率與入場建議（直接用 stock_bot 的函式）
+    # 乖離率與入場建議
     bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
+    # 進階指標
+    adv  = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
 
     sign = '+' if diff >= 0 else ''
     msg  = (
@@ -256,12 +258,34 @@ def analyze_stock(sid):
             f'\n📐 乖離率（10日）：{sp}{bias["bias_pct"]}%　{bias["bias_emoji"]} {bias["bias_label"]}\n'
             f'💡 建議入場：{bias["entry_price"]:,.1f} 元\n'
             f'🎯 目標一：{bias["target1"]:,.1f} 元　目標二：{bias["target2"]:,.1f} 元\n'
-            f'⛔ 停損參考：{bias["stop_loss"]:,.1f} 元（-5%）\n'
         )
+    # ATR 動態停損
+    if adv.get('atr_stop'):
+        msg += f'⛔ 動態停損（2×ATR）：{adv["atr_stop"]:,.1f} 元（{adv["atr_pct"]}%）\n'
+    elif bias:
+        msg += f'⛔ 停損參考：{bias["stop_loss"]:,.1f} 元（-5%）\n'
+    # 進階指標
+    if adv.get('rsi_label'):
+        msg += f'📊 RSI：{adv["rsi_label"]}\n'
+    if adv.get('resistance_label'):
+        msg += f'🏔 壓力位：{adv["resistance_label"]}\n'
+    if adv.get('position_label'):
+        msg += f'📍 位階：{adv["position_label"]}\n'
+    if adv.get('obv_label'):
+        msg += f'📦 OBV：{adv["obv_label"]}\n'
+
     msg += (
         f'\n⭐ **推薦度：{star_str(stars)}**\n'
-        f'📝 {rec}'
+        f'📝 {rec}\n'
     )
+
+    # 新手說明
+    fake_entry = {'bias': bias, 'adv': adv, 'score': int(stars * 20)}
+    if hasattr(sb, 'generate_advice'):
+        advice = sb.generate_advice(fake_entry)
+        if advice:
+            msg += advice
+
     return msg
 
 # ══════════════════════════════════════════════════════
