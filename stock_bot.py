@@ -534,8 +534,108 @@ def calc_advanced_indicators(df, price):
     return result
 
 
+
+def calc_consecutive_buy(sid, df_i_history):
+    """
+    計算法人連續買超天數。
+    df_i_history: 近5天的法人資料 list，每個元素 {'foreign': int, 'trust': int}
+    由舊到新，最後一筆是今日。
+    """
+    if not df_i_history:
+        return {'foreign_days': 0, 'trust_days': 0, 'score': 0, 'label': ''}
+
+    foreign_days = 0
+    trust_days   = 0
+    for day in reversed(df_i_history):
+        if day.get('foreign', 0) > 0: foreign_days += 1
+        else: break
+    for day in reversed(df_i_history):
+        if day.get('trust', 0) > 0: trust_days += 1
+        else: break
+
+    score = 0
+    if   foreign_days >= 5: score += 8
+    elif foreign_days >= 3: score += 5
+    elif foreign_days >= 2: score += 2
+    # 今日剛買但昨日賣超，可信度低
+    if foreign_days == 1 and len(df_i_history) >= 2:
+        if df_i_history[-2].get('foreign', 0) < 0:
+            score -= 3
+
+    label = f'外資連買 {foreign_days} 日　投信連買 {trust_days} 日'
+    return {'foreign_days': foreign_days, 'trust_days': trust_days,
+            'score': score, 'label': label}
+
+def calc_market_env(market_foreign_history):
+    """
+    大盤外資環境過濾。
+    market_foreign_history: 近3天大盤外資買賣超金額（億元），由舊到新。
+    """
+    if not market_foreign_history:
+        return {'score': 0, 'label': '', 'suspend': False}
+
+    today       = market_foreign_history[-1]
+    last3       = market_foreign_history[-3:]
+    consec_sell = all(x < 0 for x in last3)
+    total_3d    = sum(last3)
+
+    if consec_sell and total_3d < -500:
+        return {'score': 0,
+                'label': '🚨 大盤外資連3日賣超逾500億，今日暫停發出進場訊號',
+                'suspend': True}
+    elif today < -100:
+        return {'score': -5,
+                'label': f'⚠️ 大盤外資賣超 {today:.0f} 億，環境偏弱',
+                'suspend': False}
+    elif today > 100:
+        return {'score': +3,
+                'label': f'✅ 大盤外資買超 {today:.0f} 億，環境有利',
+                'suspend': False}
+    else:
+        return {'score': 0,
+                'label': f'🔄 大盤外資中性（{today:.0f} 億）',
+                'suspend': False}
+
+def calc_margin_score(margin_today, margin_5d_ago):
+    """
+    融資增幅監控。
+    margin_today: 今日融資餘額（股）
+    margin_5d_ago: 5日前融資餘額
+    """
+    if not margin_5d_ago or margin_5d_ago == 0:
+        return {'score': 0, 'label': ''}
+    pct = (margin_today - margin_5d_ago) / margin_5d_ago * 100
+    if pct >= 30:
+        return {'score': -8, 'label': f'❌ 融資5日暴增 +{pct:.1f}%，散戶追高'}
+    elif pct >= 15:
+        return {'score': -4, 'label': f'⚠️ 融資5日增加 +{pct:.1f}%，留意'}
+    elif pct >= 0:
+        return {'score':  0, 'label': f'🔄 融資5日增幅 +{pct:.1f}%'}
+    else:
+        return {'score': +3, 'label': f'✅ 融資5日減少 {pct:.1f}%，籌碼健康'}
+
+def calc_chip_concentration(foreign, trust, volume):
+    """
+    籌碼集中度 = 法人淨買超 / 成交量。
+    """
+    if not volume or volume == 0:
+        return {'score': 0, 'label': '', 'concentration': 0}
+    net_buy = max(0, int(foreign)) + max(0, int(trust))
+    conc    = round(net_buy / volume * 100, 1)
+    if conc >= 20:
+        return {'score': 8, 'label': f'🔥 籌碼集中度 {conc}%，主力強力進場', 'concentration': conc}
+    elif conc >= 10:
+        return {'score': 5, 'label': f'✅ 籌碼集中度 {conc}%，法人積極布局', 'concentration': conc}
+    elif conc >= 5:
+        return {'score': 2, 'label': f'🔄 籌碼集中度 {conc}%', 'concentration': conc}
+    else:
+        return {'score': 0, 'label': f'（籌碼集中度 {conc}%）', 'concentration': conc}
+
 def calc_score(entry):
-    """綜合積分（滿分 100），用於取代單純漲幅分級"""
+    """
+    綜合積分（基礎100分 + 四項加減分）
+    SS >= 85, S >= 68, A >= 52, 其餘淘汰
+    """
     score = 0
 
     # 漲幅（25分）
@@ -571,7 +671,6 @@ def calc_score(entry):
     elif 0 <= bp <= 5:     score += 15
     elif bp < 0:           score += 10
     elif bp <= 8:          score += 5
-    # >8% 給 0 分
 
     # RSI（10分）
     adv = entry.get('adv') or {}
@@ -580,7 +679,6 @@ def calc_score(entry):
     elif 60 <= rsi <= 80:  score += 10
     elif rsi > 80:         score += 8
     elif rsi >= 50:        score += 5
-    # <50 給 0 分
 
     # 壓力位（5分）
     rs = adv.get('resistance_score', 0)
@@ -593,7 +691,21 @@ def calc_score(entry):
     elif ps == 0:          score += 3
     elif ps == -0.5:       score += 1
 
-    return min(100, score)
+    # ── 新增四項加減分 ──
+
+    # 連續買超（+8 ~ -3）
+    score += entry.get('consec_score', 0)
+
+    # 大盤環境（+3 ~ -5）
+    score += entry.get('market_score', 0)
+
+    # 融資增幅（+3 ~ -8）
+    score += entry.get('margin_score', 0)
+
+    # 籌碼集中度（0 ~ +8）
+    score += entry.get('chip_score', 0)
+
+    return max(0, score)
 
 
 
@@ -694,6 +806,110 @@ def run_analysis():
 
     # ── 平行抓取大盤、T86、MI_INDEX ──
     market  = get_market_info(date_str)
+
+    # ── 大盤外資歷史（近3天），用於環境過濾 ──
+    _mkt_foreign_hist = []
+    try:
+        from datetime import datetime as _dt2, timedelta as _td2
+        _base_date = _dt2.strptime(date_str, '%Y%m%d').date()
+        _checked = 0
+        for _i in range(1, 8):
+            _d = _base_date - _td2(days=_i)
+            if _d.weekday() >= 5:
+                continue
+            _ds2 = _d.strftime('%Y%m%d')
+            _rm2 = safe_get(
+                'https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS',
+                params={'response': 'csv', 'date': _ds2, 'selectType': 'ALLBUT0999'},
+                timeout=10, retries=1, wait=3
+            )
+            if _rm2 and '查詢無資料' not in _rm2.text:
+                try:
+                    for _ln in _rm2.text.splitlines():
+                        if '合計' in _ln:
+                            _parts = [v.strip().strip('"').replace(',','') for v in _ln.split(',')]
+                            try:
+                                _buy  = float(_parts[2]) if len(_parts) > 2 else 0
+                                _sell = float(_parts[3]) if len(_parts) > 3 else 0
+                                _net  = round((_buy - _sell) / 100000000, 1)
+                                _mkt_foreign_hist.insert(0, _net)
+                            except:
+                                _mkt_foreign_hist.insert(0, 0)
+                            break
+                except:
+                    pass
+            _checked += 1
+            if _checked >= 3:
+                break
+    except Exception as _me:
+        print(f"[大盤外資歷史] 抓取失敗：{_me}")
+    _market_env = calc_market_env(_mkt_foreign_hist) if _mkt_foreign_hist else {'score': 0, 'label': '', 'suspend': False}
+    if _market_env.get('suspend'):
+        _all_wh = [WEBHOOK_URL] if WEBHOOK_URL else []
+        if _DB_OK:
+            try:
+                for _gw in _db.get_all_webhooks():
+                    if _gw['webhook_url'] not in _all_wh:
+                        _all_wh.append(_gw['webhook_url'])
+            except:
+                pass
+        for _wh in _all_wh:
+            requests.post(_wh, json={'content': f'⚠️ {_market_env["label"]}'}, timeout=10)
+        return
+
+        # ── 大盤外資歷史（近3天），用於環境過濾 ──
+        _mkt_foreign_hist = []
+        try:
+            from datetime import datetime as _dt2, timedelta as _td2
+            _base_date = _dt2.strptime(date_str, '%Y%m%d').date()
+            _checked = 0
+            for _i in range(1, 8):
+                _d = _base_date - _td2(days=_i)
+                if _d.weekday() >= 5:
+                    continue
+                _ds2 = _d.strftime('%Y%m%d')
+                _rm2 = safe_get(
+                    'https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS',
+                    params={'response': 'csv', 'date': _ds2, 'selectType': 'ALLBUT0999'},
+                    timeout=10, retries=1, wait=3
+                )
+                if _rm2 and '查詢無資料' not in _rm2.text:
+                    try:
+                        for _ln in _rm2.text.splitlines():
+                            if '合計' in _ln:
+                                _parts = [v.strip().strip('"').replace(',','') for v in _ln.split(',')]
+                                # 取淨買超（買進-賣出），欄位約在 index 2~4
+                                try:
+                                    _buy  = float(_parts[2]) if len(_parts) > 2 else 0
+                                    _sell = float(_parts[3]) if len(_parts) > 3 else 0
+                                    _net  = round((_buy - _sell) / 100000000, 1)
+                                    _mkt_foreign_hist.insert(0, _net)
+                                except:
+                                    _mkt_foreign_hist.insert(0, 0)
+                                break
+                    except:
+                        pass
+                _checked += 1
+                if _checked >= 3:
+                    break
+        except Exception as _me:
+            print(f"[大盤外資歷史] 抓取失敗：{_me}")
+        _market_env = calc_market_env(_mkt_foreign_hist) if _mkt_foreign_hist else {'score': 0, 'label': '', 'suspend': False}
+        if _market_env.get('suspend'):
+            _all_wh = []
+            if WEBHOOK_URL:
+                _all_wh.append(WEBHOOK_URL)
+            if _DB_OK:
+                try:
+                    for _gw in _db.get_all_webhooks():
+                        if _gw['webhook_url'] not in _all_wh:
+                            _all_wh.append(_gw['webhook_url'])
+                except:
+                    pass
+            for _wh in _all_wh:
+                requests.post(_wh, json={'content': f'⚠️ {_market_env["label"]}'}, timeout=10)
+            return
+
 
     r_inst = safe_get(
         'https://www.twse.com.tw/rwd/zh/fund/T86',
@@ -883,14 +1099,32 @@ def run_analysis():
                 # 計算進階指標（RSI / ATR / 壓力位 / OBV）
                 adv = calc_advanced_indicators(df_hist, entry['price'])
                 entry['adv'] = adv
+
+                # 大盤環境分數（全股同一個）
+                entry['market_score'] = _market_env.get('score', 0)
+
+                # 籌碼集中度（當日成交量從 df_hist 取最後一筆）
+                _vol_today = int(df_hist['volume'].iloc[-1]) if not df_hist.empty else 0
+                _chip = calc_chip_concentration(entry['foreign'], entry['trust'], _vol_today)
+                entry['chip_score'] = _chip['score']
+                entry['chip_label'] = _chip['label']
+
+                # 連買天數：需要歷史T86，目前只有當日，暫設為0，待後續加入
+                entry['consec_score'] = 0
+                entry['consec_label'] = ''
+
+                # 融資：暫設為0（需要額外API），待後續加入
+                entry['margin_score'] = 0
+                entry['margin_label'] = ''
+
                 change = entry['change']
 
                 # 積分制分級
                 score = calc_score(entry)
                 entry['score'] = score
-                if   score >= 80: ss_list.append(entry)
-                elif score >= 65:  s_list.append(entry)
-                elif score >= 50:  a_list.append(entry)
+                if   score >= 85: ss_list.append(entry)
+                elif score >= 68:  s_list.append(entry)
+                elif score >= 52:  a_list.append(entry)
                 # <50 淘汰，不加入任何列表
 
                 print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ 漲{change}% 量比{vol_ratio:.2f} EMA:{ema_mode} {elapsed:.1f}s")
@@ -974,6 +1208,12 @@ def run_analysis():
                 lines.append(f"📍 位階：{adv['position_label']}")
             if adv.get('obv_label'):
                 lines.append(f"📦 OBV：{adv['obv_label']}")
+            if e.get('chip_label') and e.get('chip_score', 0) > 0:
+                lines.append(f"💎 籌碼：{e['chip_label']}")
+            if e.get('consec_label'):
+                lines.append(f"📅 連買：{e['consec_label']}")
+            if e.get('margin_label'):
+                lines.append(f"💳 融資：{e['margin_label']}")
             lines.append('─' * 25)
             return '\n'.join(lines)
 
