@@ -99,9 +99,11 @@ def is_admin(body):
 def analyze_stock(sid):
     import pandas as pd
     sid = sid.strip().upper()
+
+    # ── 抓 K 棒（含 high/low 供進階指標使用）──
     frames = []
     d = tw_now().date().replace(day=1)
-    for _ in range(4):  # 只抓4個月，EMA需要60筆約3個月，加1個月緩衝
+    for _ in range(6):  # 6個月，EMA120需要約5個月
         ym = d.strftime('%Y%m')
         r  = sb.safe_get(
             'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
@@ -110,16 +112,19 @@ def analyze_stock(sid):
         )
         if r and '查詢無資料' not in r.text:
             try:
-                text = r.text
-                idx  = text.find('"日期"')
-                if idx == -1:
-                    for yr in ['115/', '114/', '113/']:
-                        idx = text.find(yr)
-                        if idx != -1:
-                            idx = text.rfind('\n', 0, idx) + 1
-                            break
-                if idx != -1:
-                    df = sb.safe_read_csv(text[idx:], f'SD-{sid}', min_cols=7)
+                text  = r.text
+                lines = text.splitlines()
+                hi = None
+                for i, line in enumerate(lines):
+                    if '日期' in line and '收盤' in line:
+                        hi = i; break
+                if hi is None:
+                    for i, line in enumerate(lines):
+                        import re as _re
+                        if _re.search(r'\d{3}/\d{2}/\d{2}', line):
+                            hi = max(0, i-1); break
+                if hi is not None:
+                    df = sb.safe_read_csv('\n'.join(lines[hi:]), f'SD-{sid}', min_cols=7)
                     df = df[df.iloc[:, 0].astype(str).str.match(r'^\d{3}/\d{2}/\d{2}$', na=False)].copy()
                     if not df.empty:
                         def r2d(s):
@@ -127,69 +132,30 @@ def analyze_stock(sid):
                             return date(int(y)+1911, int(m), int(dd))
                         df['date']   = df.iloc[:, 0].apply(r2d)
                         df['close']  = pd.to_numeric(df.iloc[:, 6].astype(str).str.replace(',',''), errors='coerce')
+                        df['high']   = pd.to_numeric(df.iloc[:, 4].astype(str).str.replace(',',''), errors='coerce')
+                        df['low']    = pd.to_numeric(df.iloc[:, 5].astype(str).str.replace(',',''), errors='coerce')
                         df['volume'] = pd.to_numeric(df.iloc[:, 1].astype(str).str.replace(',',''), errors='coerce')
-                        frames.append(df[['date','close','volume']].dropna())
+                        frames.append(df[['date','close','high','low','volume']].dropna(subset=['date','close']))
             except:
                 pass
         d = (d - timedelta(days=1)).replace(day=1)
-        time.sleep(0.2)
+        time.sleep(0.3)
 
     if not frames:
         return None
-
     df_all = pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
-    if len(df_all) < 2:
+    if len(df_all) < 10:
         return None
 
-    latest = df_all.iloc[-1]
-    prev   = df_all.iloc[-2]
-    price  = latest['close']
-    diff   = price - prev['close']
-    change = round(diff / prev['close'] * 100, 2) if prev['close'] else 0.0
-
-    vol_ratio        = sb.calc_volume_ratio(df_all, latest['date'])
+    # ── 基本數值 ──
+    price     = float(df_all['close'].iloc[-1])
+    prev_close= float(df_all['close'].iloc[-2])
+    diff      = price - prev_close
+    change    = round(diff / prev_close * 100, 2) if prev_close else 0.0
+    vol_ratio = sb.calc_volume_ratio(df_all, df_all['date'].iloc[-1])
     is_bull, ema_mode = sb.check_ema_bull(df_all)
 
-    # 前3交易日分析（用於加強星級判斷）
-    recent3 = df_all.tail(4)  # 含今日共4筆
-    changes_3d = []
-    volratios_3d = []
-    for i in range(len(recent3)-1, 0, -1):
-        c_now  = recent3.iloc[i]['close']
-        c_prev = recent3.iloc[i-1]['close']
-        if c_prev:
-            changes_3d.append((c_now - c_prev) / c_prev * 100)
-    # 前3日量比（用今日量 vs 更早均量）
-    if len(df_all) >= 6:
-        for i in range(len(df_all)-3, len(df_all)):
-            today_vol = df_all.iloc[i]['volume']
-            avg5      = df_all.iloc[max(0,i-6):i-1]['volume'].mean()
-            if avg5 > 0:
-                volratios_3d.append(today_vol / avg5)
-
-    avg_change_3d   = sum(changes_3d) / len(changes_3d) if changes_3d else change
-    avg_volratio_3d = sum(volratios_3d) / len(volratios_3d) if volratios_3d else vol_ratio
-    # 前3日連漲天數
-    up_days = sum(1 for c in changes_3d if c > 0)
-
-    # 星級（綜合前3日）
-    stars = 0.0
-    if is_bull:
-        stars += 1.5 if ema_mode == 'full' else 1.0
-    # 量比：用前3日平均
-    if avg_volratio_3d >= 2.0: stars += 1.0
-    elif avg_volratio_3d >= 1.5: stars += 0.5
-    # 漲幅：今日 + 前3日平均
-    if change >= 3.5:              stars += 0.5
-    elif change >= 1.0:            stars += 0.25
-    elif change < -1.0:            stars -= 0.5
-    if avg_change_3d >= 2.0:       stars += 0.5
-    elif avg_change_3d >= 0.5:     stars += 0.25
-    elif avg_change_3d < -1.0:     stars -= 0.25
-    # 連漲加分
-    if up_days == 3:               stars += 0.5
-    elif up_days == 2:             stars += 0.25
-
+    # ── 法人資料 ──
     foreign = trust = None
     try:
         date_str = sb.get_target_date('auto')
@@ -205,64 +171,63 @@ def analyze_stock(sid):
                 if not row.empty:
                     foreign = int(row['_foreign'].values[0])
                     trust   = int(row['_trust'].values[0])
-                    if foreign > 100000:   stars += 1.0
-                    elif foreign > 50000:  stars += 0.5
-                    elif foreign > 0:      stars += 0.25
-                    if trust > 50000:      stars += 0.5
-                    elif trust > 10000:    stars += 0.25
     except:
         pass
 
-    # 乖離率與進階指標（先算，供後續推薦度使用）
-    bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
-    adv  = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
-
-    # 籌碼集中度
-    chip = {}
+    # ── 進階指標（需要 high/low）──
+    bias  = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
+    adv   = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
+    chip  = {}
     if foreign is not None and hasattr(sb, 'calc_chip_concentration'):
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
         chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
 
-    # 融資增幅（不呼叫API，避免拖慢速度，改用積分制替代）
-    margin = {}
+    # ── 推薦度（星級）──
+    stars = 0.0
+    if is_bull:
+        stars += 1.5 if ema_mode == 'full' else 1.0
+    if vol_ratio >= 2.0:   stars += 1.0
+    elif vol_ratio >= 1.5: stars += 0.5
+    if change >= 3.5:      stars += 0.5
+    elif change >= 1.0:    stars += 0.25
+    elif change < -1.0:    stars -= 0.5
+    if foreign is not None:
+        if foreign > 100000:   stars += 1.0
+        elif foreign > 50000:  stars += 0.5
+        elif foreign > 0:      stars += 0.25
+    if trust is not None:
+        if trust > 50000:  stars += 0.5
+        elif trust > 10000: stars += 0.25
+    if chip.get('score', 0) >= 10: stars += 0.5
+    elif chip.get('score', 0) >= 5: stars += 0.25
+    rsi = adv.get('rsi')
+    if rsi and 60 <= rsi <= 80: stars += 0.25
+    if adv.get('position_score', 0) < -0.5: stars -= 0.5
+    stars = round(max(0, min(5, stars)), 1)
 
-    stars = max(0, min(5, stars))
-
-    # 加入新指標調整（籌碼）
-    _extra = 0.0
-    if chip.get('score', 0) >= 10: _extra += 0.5
-    elif chip.get('score', 0) >= 5: _extra += 0.25
-    stars = round(max(0, min(5, stars + _extra)), 1)
-
-    # 分析文字
-    trend  = '多頭排列' if is_bull else '非多頭'
-    ema_lv = '（20>60>120）' if ema_mode == 'full' else '（10>20>60）' if ema_mode == 'fallback' else '（資料不足）'
     if stars >= 4:   rec = '強力推薦，法人站台、趨勢向上，可追蹤布局。'
     elif stars >= 3: rec = '條件不錯，但需確認大盤配合，可小量觀察。'
     elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
     else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
 
-    # ── 組裝輸出（完全對齊每日分析格式）──
+    # ── 組裝輸出（與每日分析 stock_block 完全一致）──
     sign    = '+' if diff >= 0 else ''
     ema_tag = '(備援EMA)' if ema_mode == 'fallback' else ''
     lines   = [
         f'🔍 **{sid}**',
-        f'🔹收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio}x{ema_tag}',
+        f'🔹收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio:.1f}x{ema_tag}',
     ]
     if foreign is not None:
         lines.append(f'🔹外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股')
-
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
         lines.append(f"📐 乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
         lines.append(f"💡 建議入場：{bias['entry_price']:,.1f} 元")
         lines.append(f"🎯 目標一：{bias['target1']:,.1f} 元　目標二：{bias['target2']:,.1f} 元")
-
     if adv.get('atr_stop'):
         lines.append(f"⛔ 動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     elif bias:
         lines.append(f"⛔ 停損參考：{bias['stop_loss']:,.1f} 元（-5%）")
-
     if adv.get('rsi_label'):
         lines.append(f"📊 RSI：{adv['rsi_label']}")
     if adv.get('resistance_label'):
@@ -273,13 +238,10 @@ def analyze_stock(sid):
         lines.append(f"📦 OBV：{adv['obv_label']}")
     if chip.get('label') and chip.get('score', 0) > 0:
         lines.append(f"💎 籌碼：{chip['label']}")
-    if margin.get('label'):
-        lines.append(f"💳 融資：{margin['label']}")
-
     lines.append(f'\n⭐ **推薦度：{star_str(stars)}**')
     lines.append(f'📝 {rec}')
-
     return '\n'.join(lines)
+
 
 # ══════════════════════════════════════════════════════
 # /topbuyer /topseller
