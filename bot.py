@@ -210,36 +210,43 @@ def analyze_stock(sid):
     elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
     else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
 
-    # ── 組裝輸出（與每日分析 stock_block 完全一致）──
+    # ── 組裝輸出（與每日分析格式一致）──
     sign    = '+' if diff >= 0 else ''
     ema_tag = '(備援EMA)' if ema_mode == 'fallback' else ''
     lines   = [
         f'🔍 **{sid}**',
-        f'🔹收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio:.1f}x{ema_tag}',
+        '',
+        '🔹基本資料',
+        f'收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio:.1f}x{ema_tag}',
     ]
     if foreign is not None:
-        lines.append(f'🔹外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股')
+        lines.append(f'外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股')
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
-        lines.append(f"📐 乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
-        lines.append(f"💡 建議入場：{bias['entry_price']:,.1f} 元")
-        lines.append(f"🎯 目標一：{bias['target1']:,.1f} 元　目標二：{bias['target2']:,.1f} 元")
+        lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
+        lines += ['', '🎯價格建議',
+                  f"建議入場：{bias['entry_price']:,.1f} 元",
+                  f"目標一：{bias['target1']:,.1f} 元　目標二：{bias['target2']:,.1f} 元"]
     if adv.get('atr_stop'):
-        lines.append(f"⛔ 動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
+        lines.append(f"動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     elif bias:
-        lines.append(f"⛔ 停損參考：{bias['stop_loss']:,.1f} 元（-5%）")
-    if adv.get('rsi_label'):
-        lines.append(f"📊 RSI：{adv['rsi_label']}")
-    if adv.get('resistance_label'):
-        lines.append(f"🏔 壓力位：{adv['resistance_label']}")
-    if adv.get('position_label'):
-        lines.append(f"📍 位階：{adv['position_label']}")
-    if adv.get('obv_label'):
-        lines.append(f"📦 OBV：{adv['obv_label']}")
-    if chip.get('label') and chip.get('score', 0) > 0:
-        lines.append(f"💎 籌碼：{chip['label']}")
-    lines.append(f'\n⭐ **推薦度：{star_str(stars)}**')
-    lines.append(f'📝 {rec}')
+        lines.append(f"停損參考：{bias['stop_loss']:,.1f} 元（-5%）")
+    has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
+                   adv.get('position_label'), adv.get('obv_label'),
+                   chip.get('score', 0) > 0])
+    if has_adv:
+        lines += ['', '📊輔助數據']
+        if adv.get('rsi_label'):
+            lines.append(f"RSI：{adv['rsi_label']}")
+        if adv.get('resistance_label'):
+            lines.append(f"壓力位：{adv['resistance_label']}")
+        if adv.get('position_label'):
+            lines.append(f"位階：{adv['position_label']}")
+        if adv.get('obv_label'):
+            lines.append(f"OBV：{adv['obv_label']}")
+        if chip.get('label') and chip.get('score', 0) > 0:
+            lines.append(f"籌碼：{chip['label']}")
+    lines += ['', f'⭐ **推薦度：{star_str(stars)}**', f'📝 {rec}']
     return '\n'.join(lines)
 
 
