@@ -156,36 +156,6 @@ def get_market_info(date_str):
         print(f"[大盤解析失敗] {e}")
         return None
 
-# ══════════════════════════════════════════════════════════
-# 股市趨勢新聞（Google News RSS，台股相關）
-# ══════════════════════════════════════════════════════════
-def fetch_stock_news(count=10):
-    """
-    從 Google News RSS 抓取台股相關新聞標題。
-    回傳最新 count 則新聞的清單 [{'title': ..., 'source': ...}]。
-    """
-    import xml.etree.ElementTree as ET
-    rss_url = 'https://news.google.com/rss/search?q=台股+股市&hl=zh-TW&gl=TW&ceid=TW:zh-Hant'
-    r = safe_get(rss_url, timeout=15, retries=2, wait=5)
-    if r is None:
-        print("[新聞] 抓取失敗")
-        return []
-    try:
-        root = ET.fromstring(r.content)
-        items = root.findall('.//item')
-        news = []
-        for item in items[:count]:
-            title  = item.findtext('title', '').strip()
-            source = item.findtext('source', '').strip()
-            # 去掉標題末尾的來源名稱（Google News 格式：標題 - 來源）
-            if ' - ' in title:
-                title, source = title.rsplit(' - ', 1)
-            news.append({'title': title.strip(), 'source': source.strip()})
-        print(f"[新聞] 取得 {len(news)} 則")
-        return news
-    except Exception as e:
-        print(f"[新聞] 解析失敗：{e}")
-        return []
 
 # ══════════════════════════════════════════════════════════
 # T86 法人解析（用固定欄位索引，不依賴欄位名稱字串）
@@ -544,8 +514,16 @@ def fetch_margin_change(sid, date_str):
     MI_MARGN 欄位 idx 5 = 融資餘額（張）
     """
     import re as _re
-    prev_dates = get_prev_trading_dates(date_str, 5)
-    date_5d    = prev_dates[0]  # 最舊的那天
+    from datetime import datetime as _dt2, timedelta as _td2
+    # 取前5個交易日（排除週末）
+    _base = _dt2.strptime(date_str, '%Y%m%d').date()
+    _prev = []
+    _d = _base - _td2(days=1)
+    while len(_prev) < 5:
+        if _d.weekday() < 5:
+            _prev.append(_d.strftime('%Y%m%d'))
+        _d -= _td2(days=1)
+    date_5d = _prev[-1]  # 最舊的那天
 
     def get_margin(ds):
         r = safe_get(
@@ -1222,40 +1200,46 @@ def run_analysis():
         # 組裝 Discord 訊息
         # ══════════════════════════════════════
         def stock_block(e, emoji_open, grade_label, emoji_close):
-            sign    = '+' if e['change'] >= 0 else ''
-            ema_tag = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
-            b       = e.get('bias')
-            adv     = e.get('adv', {})
-            score_str = f"　{e['score']}分" if 'score' in e else ''
-            lines   = [
+            sign      = '+' if e['change'] >= 0 else ''
+            ema_tag   = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
+            b         = e.get('bias')
+            adv       = e.get('adv', {})
+            score_str = f" {e['score']}分" if 'score' in e else ''
+            lines = [
                 f"{emoji_open}【{grade_label}{score_str}】{e['sid']} {e['name']}{emoji_close}",
-                f"🔹收盤價格：{e['price']}　漲幅：{sign}{e['change']}%　量比：{e.get('vol_ratio', 0):.1f}x{ema_tag}",
-                f"🔹外資：{fmt_share(e['foreign'])}股　投信：{fmt_share(e['trust'])}股",
+                '',
+                '🔹基本資料',
+                f"收盤價格：{e['price']}　漲幅：{sign}{e['change']}%　量比：{e.get('vol_ratio', 0):.1f}x{ema_tag}",
+                f"外資：{fmt_share(e['foreign'])}股　投信：{fmt_share(e['trust'])}股",
             ]
             if b:
                 sp = '+' if b['bias_pct'] >= 0 else ''
-                lines.append(f"📐 乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
-                lines.append(f"💡 建議入場：{b['entry_price']:,.1f} 元")
-                lines.append(f"🎯 目標一：{b['target1']:,.1f} 元　目標二：{b['target2']:,.1f} 元")
-            # ATR 動態停損（優先於固定-5%）
+                lines.append(f"乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
+                lines += ['', '🎯價格建議',
+                          f"建議入場：{b['entry_price']:,.1f} 元",
+                          f"目標一：{b['target1']:,.1f} 元　目標二：{b['target2']:,.1f} 元"]
             if adv.get('atr_stop'):
-                lines.append(f"⛔ 動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
+                lines.append(f"動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
             elif b:
-                lines.append(f"⛔ 停損參考：{b['stop_loss']:,.1f} 元（-5%）")
-            # 進階指標
-            if adv.get('rsi_label'):
-                lines.append(f"📊 RSI：{adv['rsi_label']}")
-            if adv.get('resistance_label'):
-                lines.append(f"🏔 壓力位：{adv['resistance_label']}")
-            if adv.get('position_label'):
-                lines.append(f"📍 位階：{adv['position_label']}")
-            if adv.get('obv_label'):
-                lines.append(f"📦 OBV：{adv['obv_label']}")
-            if e.get('chip_label') and e.get('chip_score', 0) > 0:
-                lines.append(f"💎 籌碼：{e['chip_label']}")
-
-            if e.get('margin_label'):
-                lines.append(f"💳 融資：{e['margin_label']}")
+                lines.append(f"停損參考：{b['stop_loss']:,.1f} 元（-5%）")
+            has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
+                           adv.get('position_label'), adv.get('obv_label'),
+                           (e.get('chip_label') and e.get('chip_score', 0) > 0),
+                           e.get('margin_label')])
+            if has_adv:
+                lines += ['', '📊輔助數據']
+                if adv.get('rsi_label'):
+                    lines.append(f"RSI：{adv['rsi_label']}")
+                if adv.get('resistance_label'):
+                    lines.append(f"壓力位：{adv['resistance_label']}")
+                if adv.get('position_label'):
+                    lines.append(f"位階：{adv['position_label']}")
+                if adv.get('obv_label'):
+                    lines.append(f"OBV：{adv['obv_label']}")
+                if e.get('chip_label') and e.get('chip_score', 0) > 0:
+                    lines.append(f"籌碼：{e['chip_label']}")
+                if e.get('margin_label'):
+                    lines.append(f"融資：{e['margin_label']}")
             lines.append('─' * 25)
             return '\n'.join(lines)
 
