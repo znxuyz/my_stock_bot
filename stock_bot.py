@@ -801,12 +801,34 @@ INDICATOR_GUIDE = """
 """
 
 def run_analysis():
-    if not WEBHOOK_URL:
-        print('[錯誤] 未設定 DISCORD_WEBHOOK 環境變數')
+    # 允許只靠 DB webhook 運作（不強制要求環境變數）
+    if not WEBHOOK_URL and not _DB_OK:
+        print('[錯誤] 未設定 DISCORD_WEBHOOK 且資料庫未連線，無法發送')
         return
 
     run_mode = os.environ.get('RUN_MODE', 'auto').strip().lower()
     date_str = get_target_date(run_mode)
+
+    # 取得所有 webhook 供全程使用
+    def _get_all_webhooks():
+        whs = [WEBHOOK_URL] if WEBHOOK_URL else []
+        if _DB_OK:
+            try:
+                for gw in _db.get_all_webhooks():
+                    if gw['webhook_url'] and gw['webhook_url'] not in whs:
+                        whs.append(gw['webhook_url'])
+            except:
+                pass
+        return whs
+
+    def _notify_all(msg):
+        for wh in _get_all_webhooks():
+            try:
+                requests.post(wh, json={'username': '川投顧量化系統', 'content': msg}, timeout=10)
+            except:
+                pass
+
+    _notify_all(f'⏳ 量化分析啟動中（{date_str}），預計 10~20 分鐘後發送結果...')
     now_tw   = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
 
     if run_mode == 'preview':
@@ -1273,15 +1295,7 @@ def run_analysis():
             chunks.append(buf)
 
         # 發送至所有已設定伺服器
-        webhooks = [WEBHOOK_URL] if WEBHOOK_URL else []
-        if _DB_OK:
-            try:
-                for gw in _db.get_all_webhooks():
-                    wh = gw['webhook_url']
-                    if wh and wh not in webhooks:
-                        webhooks.append(wh)
-            except Exception as _we:
-                print(f"[DB] 取得 webhook 失敗：{_we}")
+        webhooks = _get_all_webhooks()
 
         for wh in webhooks:
             for i, chunk in enumerate(chunks):
@@ -1299,7 +1313,7 @@ def run_analysis():
     except Exception as e:
         import traceback
         print(f"[主程式錯誤]\n{traceback.format_exc()}")
-        requests.post(WEBHOOK_URL, json={'content': f'❌ 系統錯誤：{e}'}, timeout=15)
+        _notify_all(f'❌ 系統錯誤：{e}')
 
 if __name__ == '__main__':
     run_analysis()
