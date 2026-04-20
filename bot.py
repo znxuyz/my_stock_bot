@@ -101,7 +101,7 @@ def analyze_stock(sid):
     sid = sid.strip().upper()
     frames = []
     d = tw_now().date().replace(day=1)
-    for _ in range(7):
+    for _ in range(4):  # 只抓4個月，EMA需要60筆約3個月，加1個月緩衝
         ym = d.strftime('%Y%m')
         r  = sb.safe_get(
             'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
@@ -213,14 +213,25 @@ def analyze_stock(sid):
     except:
         pass
 
+    # 乖離率與進階指標（先算，供後續推薦度使用）
+    bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
+    adv  = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
+
+    # 籌碼集中度
+    chip = {}
+    if foreign is not None and hasattr(sb, 'calc_chip_concentration'):
+        vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
+        chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
+
+    # 融資增幅（不呼叫API，避免拖慢速度，改用積分制替代）
+    margin = {}
+
     stars = max(0, min(5, stars))
 
-    # 加入新指標調整（籌碼、融資、大盤）
-    _extra = 0
-    if chip.get('score', 0) > 0:
-        _extra += chip['score'] / 8 * 0.5  # 最高 +0.5 星
-    if margin.get('score', 0) < 0:
-        _extra += margin['score'] / 8 * 0.5  # 最低 -0.5 星
+    # 加入新指標調整（籌碼）
+    _extra = 0.0
+    if chip.get('score', 0) >= 10: _extra += 0.5
+    elif chip.get('score', 0) >= 5: _extra += 0.25
     stars = round(max(0, min(5, stars + _extra)), 1)
 
     # 分析文字
@@ -230,29 +241,6 @@ def analyze_stock(sid):
     elif stars >= 3: rec = '條件不錯，但需確認大盤配合，可小量觀察。'
     elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
     else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
-
-    # 乖離率與入場建議
-    bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
-    # 進階指標（RSI / ATR / 壓力位 / OBV）
-    adv  = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
-
-    # 籌碼集中度
-    chip = {}
-    if foreign is not None and hasattr(sb, 'calc_chip_concentration'):
-        vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
-        chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
-
-    # 連買天數：已移除（資料來源不可靠）
-    consec = {}
-
-    # 融資增幅
-    margin = {}
-    if hasattr(sb, 'fetch_margin_change'):
-        try:
-            date_str_now = sb.get_target_date('auto')
-            margin = sb.fetch_margin_change(sid, date_str_now)
-        except Exception as _me:
-            margin = {'score': 0, 'label': ''}
 
     # ── 組裝輸出（完全對齊每日分析格式）──
     sign    = '+' if diff >= 0 else ''
