@@ -535,6 +535,111 @@ def calc_advanced_indicators(df, price):
 
 
 
+
+def get_prev_trading_dates(date_str, n=5):
+    """取得 date_str 之前的 n 個交易日（排除週末）"""
+    from datetime import datetime as _dt, timedelta as _td
+    base = _dt.strptime(date_str, '%Y%m%d').date()
+    result = []
+    d = base - _td(days=1)
+    while len(result) < n:
+        if d.weekday() < 5:
+            result.append(d.strftime('%Y%m%d'))
+        d -= _td(days=1)
+    return list(reversed(result))  # 由舊到新
+
+def fetch_consecutive_buy(sid, date_str, n=5):
+    """
+    抓 sid 過去 n 天的外資/投信買賣超，計算連買天數。
+    回傳 {'foreign_days', 'trust_days', 'score', 'label'}
+    """
+    import re as _re
+    prev_dates = get_prev_trading_dates(date_str, n)
+    history = []
+    for ds in prev_dates:
+        r = safe_get(
+            'https://www.twse.com.tw/rwd/zh/fund/T86',
+            params={'response': 'csv', 'date': ds, 'selectType': 'ALLBUT0999'},
+            timeout=12, retries=1, wait=3
+        )
+        found = None
+        if r and '查詢無資料' not in r.text:
+            for line in r.text.splitlines():
+                parts = [v.strip().strip('"').replace(',','') for v in line.split(',')]
+                if len(parts) < 11:
+                    continue
+                raw = _re.sub(r'[="\\s\t ]', '', parts[0]).strip()
+                if raw == sid:
+                    try:
+                        found = {'foreign': float(parts[4]), 'trust': float(parts[10])}
+                    except:
+                        pass
+                    break
+        history.append(found or {'foreign': 0, 'trust': 0})
+        time.sleep(0.3)
+
+    foreign_days = trust_days = 0
+    for day in reversed(history):
+        if day.get('foreign', 0) > 0: foreign_days += 1
+        else: break
+    for day in reversed(history):
+        if day.get('trust', 0) > 0: trust_days += 1
+        else: break
+
+    score = 0
+    if   foreign_days >= 5: score += 8
+    elif foreign_days >= 3: score += 5
+    elif foreign_days >= 2: score += 2
+    if foreign_days == 1 and len(history) >= 2:
+        if history[-2].get('foreign', 0) < 0:
+            score -= 3
+
+    label = f'外資連買 {foreign_days} 日　投信連買 {trust_days} 日'
+    return {'foreign_days': foreign_days, 'trust_days': trust_days,
+            'score': score, 'label': label}
+
+def fetch_margin_change(sid, date_str):
+    """
+    抓 sid 今日和 5 個交易日前的融資餘額，計算增幅。
+    MI_MARGN 欄位 idx 5 = 融資餘額（張）
+    """
+    import re as _re
+    prev_dates = get_prev_trading_dates(date_str, 5)
+    date_5d    = prev_dates[0]  # 最舊的那天
+
+    def get_margin(ds):
+        r = safe_get(
+            'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN',
+            params={'response': 'csv', 'date': ds, 'selectType': 'ALLBUT0999'},
+            timeout=12, retries=1, wait=3
+        )
+        if not r or '查詢無資料' in r.text:
+            return None
+        for line in r.text.splitlines():
+            parts = [v.strip().strip('"').replace(',','') for v in line.split(',')]
+            if len(parts) < 6:
+                continue
+            raw = _re.sub(r'[="\\s\t ]', '', parts[0]).strip()
+            if raw == sid:
+                try:
+                    return float(parts[5]) * 1000  # 張→股
+                except:
+                    return None
+        return None
+
+    margin_today = get_margin(date_str)
+    time.sleep(0.3)
+    margin_5d    = get_margin(date_5d)
+
+    if margin_today is None or margin_5d is None or margin_5d == 0:
+        return {'score': 0, 'label': ''}
+
+    pct = (margin_today - margin_5d) / margin_5d * 100
+    if pct >= 30:   return {'score': -8, 'label': f'❌ 融資5日暴增 +{pct:.1f}%'}
+    elif pct >= 15: return {'score': -4, 'label': f'⚠️ 融資5日增加 +{pct:.1f}%'}
+    elif pct >= 0:  return {'score':  0, 'label': f'🔄 融資5日 +{pct:.1f}%'}
+    else:           return {'score': +3, 'label': f'✅ 融資5日 {pct:.1f}%，籌碼健康'}
+
 def calc_consecutive_buy(sid, df_i_history):
     """
     計算法人連續買超天數。
@@ -1109,13 +1214,25 @@ def run_analysis():
                 entry['chip_score'] = _chip['score']
                 entry['chip_label'] = _chip['label']
 
-                # 連買天數：需要歷史T86，目前只有當日，暫設為0，待後續加入
-                entry['consec_score'] = 0
-                entry['consec_label'] = ''
+                # 連買天數（抓過去5天T86）
+                try:
+                    _consec = fetch_consecutive_buy(sid, date_str, n=5)
+                    entry['consec_score'] = _consec['score']
+                    entry['consec_label'] = _consec['label']
+                except Exception as _ce:
+                    entry['consec_score'] = 0
+                    entry['consec_label'] = ''
+                    print(f"[連買] {sid} 失敗：{_ce}")
 
-                # 融資：暫設為0（需要額外API），待後續加入
-                entry['margin_score'] = 0
-                entry['margin_label'] = ''
+                # 融資增幅
+                try:
+                    _margin = fetch_margin_change(sid, date_str)
+                    entry['margin_score'] = _margin['score']
+                    entry['margin_label'] = _margin['label']
+                except Exception as _me2:
+                    entry['margin_score'] = 0
+                    entry['margin_label'] = ''
+                    print(f"[融資] {sid} 失敗：{_me2}")
 
                 change = entry['change']
 
