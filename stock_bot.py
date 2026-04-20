@@ -536,67 +536,7 @@ def calc_advanced_indicators(df, price):
 
 
 
-def get_prev_trading_dates(date_str, n=5):
-    """取得 date_str 之前的 n 個交易日（排除週末）"""
-    from datetime import datetime as _dt, timedelta as _td
-    base = _dt.strptime(date_str, '%Y%m%d').date()
-    result = []
-    d = base - _td(days=1)
-    while len(result) < n:
-        if d.weekday() < 5:
-            result.append(d.strftime('%Y%m%d'))
-        d -= _td(days=1)
-    return list(reversed(result))  # 由舊到新
 
-def fetch_consecutive_buy(sid, date_str, n=5):
-    """
-    抓 sid 過去 n 天的外資/投信買賣超，計算連買天數。
-    回傳 {'foreign_days', 'trust_days', 'score', 'label'}
-    """
-    import re as _re
-    prev_dates = get_prev_trading_dates(date_str, n)
-    history = []
-    for ds in prev_dates:
-        r = safe_get(
-            'https://www.twse.com.tw/rwd/zh/fund/T86',
-            params={'response': 'csv', 'date': ds, 'selectType': 'ALLBUT0999'},
-            timeout=12, retries=1, wait=3
-        )
-        found = None
-        if r and '查詢無資料' not in r.text:
-            for line in r.text.splitlines():
-                parts = [v.strip().strip('"').replace(',','') for v in line.split(',')]
-                if len(parts) < 11:
-                    continue
-                raw = _re.sub(r'[="\\s\t ]', '', parts[0]).strip()
-                if raw == sid:
-                    try:
-                        found = {'foreign': float(parts[4]), 'trust': float(parts[10])}
-                    except:
-                        pass
-                    break
-        history.append(found or {'foreign': 0, 'trust': 0})
-        time.sleep(0.3)
-
-    foreign_days = trust_days = 0
-    for day in reversed(history):
-        if day.get('foreign', 0) > 0: foreign_days += 1
-        else: break
-    for day in reversed(history):
-        if day.get('trust', 0) > 0: trust_days += 1
-        else: break
-
-    score = 0
-    if   foreign_days >= 5: score += 8
-    elif foreign_days >= 3: score += 5
-    elif foreign_days >= 2: score += 2
-    if foreign_days == 1 and len(history) >= 2:
-        if history[-2].get('foreign', 0) < 0:
-            score -= 3
-
-    label = f'外資連買 {foreign_days} 日　投信連買 {trust_days} 日'
-    return {'foreign_days': foreign_days, 'trust_days': trust_days,
-            'score': score, 'label': label}
 
 def fetch_margin_change(sid, date_str):
     """
@@ -640,36 +580,6 @@ def fetch_margin_change(sid, date_str):
     elif pct >= 0:  return {'score':  0, 'label': f'🔄 融資5日 +{pct:.1f}%'}
     else:           return {'score': +3, 'label': f'✅ 融資5日 {pct:.1f}%，籌碼健康'}
 
-def calc_consecutive_buy(sid, df_i_history):
-    """
-    計算法人連續買超天數。
-    df_i_history: 近5天的法人資料 list，每個元素 {'foreign': int, 'trust': int}
-    由舊到新，最後一筆是今日。
-    """
-    if not df_i_history:
-        return {'foreign_days': 0, 'trust_days': 0, 'score': 0, 'label': ''}
-
-    foreign_days = 0
-    trust_days   = 0
-    for day in reversed(df_i_history):
-        if day.get('foreign', 0) > 0: foreign_days += 1
-        else: break
-    for day in reversed(df_i_history):
-        if day.get('trust', 0) > 0: trust_days += 1
-        else: break
-
-    score = 0
-    if   foreign_days >= 5: score += 8
-    elif foreign_days >= 3: score += 5
-    elif foreign_days >= 2: score += 2
-    # 今日剛買但昨日賣超，可信度低
-    if foreign_days == 1 and len(df_i_history) >= 2:
-        if df_i_history[-2].get('foreign', 0) < 0:
-            score -= 3
-
-    label = f'外資連買 {foreign_days} 日　投信連買 {trust_days} 日'
-    return {'foreign_days': foreign_days, 'trust_days': trust_days,
-            'score': score, 'label': label}
 
 def calc_market_env(market_foreign_history):
     """
@@ -1214,15 +1124,9 @@ def run_analysis():
                 entry['chip_score'] = _chip['score']
                 entry['chip_label'] = _chip['label']
 
-                # 連買天數（抓過去5天T86）
-                try:
-                    _consec = fetch_consecutive_buy(sid, date_str, n=5)
-                    entry['consec_score'] = _consec['score']
-                    entry['consec_label'] = _consec['label']
-                except Exception as _ce:
-                    entry['consec_score'] = 0
-                    entry['consec_label'] = ''
-                    print(f"[連買] {sid} 失敗：{_ce}")
+                # 連買天數：已移除（資料來源不可靠）
+                entry['consec_score'] = 0
+                entry['consec_label'] = ''
 
                 # 融資增幅
                 try:
@@ -1327,8 +1231,7 @@ def run_analysis():
                 lines.append(f"📦 OBV：{adv['obv_label']}")
             if e.get('chip_label') and e.get('chip_score', 0) > 0:
                 lines.append(f"💎 籌碼：{e['chip_label']}")
-            if e.get('consec_label'):
-                lines.append(f"📅 連買：{e['consec_label']}")
+
             if e.get('margin_label'):
                 lines.append(f"💳 融資：{e['margin_label']}")
             lines.append('─' * 25)
@@ -1391,21 +1294,7 @@ def run_analysis():
                     time.sleep(0.5)
             time.sleep(1)
 
-        # ── 股市趨勢新聞（股票清單發送完畢後獨立發送）──
-        news_list = fetch_stock_news(count=10)
-        if news_list:
-            news_lines = ['📰 **【台股趨勢新聞】**\n' + '─'*25]
-            for i, n in enumerate(news_list, 1):
-                source_tag = f"　_{n['source']}_" if n['source'] else ''
-                news_lines.append(f"{i}. {n['title']}{source_tag}")
-            news_msg = '\n'.join(news_lines)
-            requests.post(
-                WEBHOOK_URL,
-                json={'username': '川投顧量化系統', 'content': news_msg},
-                timeout=15
-            )
-        else:
-            print("[新聞] 無資料，跳過發送")
+
 
     except Exception as e:
         import traceback
