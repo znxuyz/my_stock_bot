@@ -238,8 +238,32 @@ def analyze_stock(sid):
 
     # 乖離率與入場建議
     bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
-    # 進階指標
+    # 進階指標（RSI / ATR / 壓力位 / OBV）
     adv  = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
+
+    # 籌碼集中度
+    chip = {}
+    if foreign is not None and hasattr(sb, 'calc_chip_concentration'):
+        vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
+        chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
+
+    # 連買天數（抓過去5天T86）
+    consec = {}
+    if hasattr(sb, 'fetch_consecutive_buy'):
+        try:
+            date_str_now = sb.get_target_date('auto')
+            consec = sb.fetch_consecutive_buy(sid, date_str_now, n=5)
+        except Exception as _ce:
+            consec = {'score': 0, 'label': ''}
+
+    # 融資增幅
+    margin = {}
+    if hasattr(sb, 'fetch_margin_change'):
+        try:
+            date_str_now = sb.get_target_date('auto')
+            margin = sb.fetch_margin_change(sid, date_str_now)
+        except Exception as _me:
+            margin = {'score': 0, 'label': ''}
 
     sign = '+' if diff >= 0 else ''
     msg  = (
@@ -273,6 +297,12 @@ def analyze_stock(sid):
         msg += f'📍 位階：{adv["position_label"]}\n'
     if adv.get('obv_label'):
         msg += f'📦 OBV：{adv["obv_label"]}\n'
+    if chip.get('label') and chip.get('score', 0) > 0:
+        msg += f'💎 籌碼集中度：{chip["label"]}\n'
+    if consec.get('label'):
+        msg += f'📅 法人連買：{consec["label"]}\n'
+    if margin.get('label'):
+        msg += f'💳 融資狀況：{margin["label"]}\n'
 
     msg += (
         f'\n⭐ **推薦度：{star_str(stars)}**\n'
