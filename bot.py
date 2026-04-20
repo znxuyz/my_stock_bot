@@ -215,6 +215,14 @@ def analyze_stock(sid):
 
     stars = max(0, min(5, stars))
 
+    # 加入新指標調整（籌碼、融資、大盤）
+    _extra = 0
+    if chip.get('score', 0) > 0:
+        _extra += chip['score'] / 8 * 0.5  # 最高 +0.5 星
+    if margin.get('score', 0) < 0:
+        _extra += margin['score'] / 8 * 0.5  # 最低 -0.5 星
+    stars = round(max(0, min(5, stars + _extra)), 1)
+
     # 分析文字
     trend  = '多頭排列' if is_bull else '非多頭'
     ema_lv = '（20>60>120）' if ema_mode == 'full' else '（10>20>60）' if ema_mode == 'fallback' else '（資料不足）'
@@ -222,19 +230,6 @@ def analyze_stock(sid):
     elif stars >= 3: rec = '條件不錯，但需確認大盤配合，可小量觀察。'
     elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
     else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
-
-    # 前3交易日走勢
-    recent = df_all.tail(4)  # 取最近4筆（今日+前3日）
-    trend_lines = []
-    for i in range(len(recent)-1, 0, -1):
-        row_c = recent.iloc[i]
-        row_p = recent.iloc[i-1]
-        d     = row_c['date']
-        c     = row_c['close']
-        ch    = round((c - row_p['close']) / row_p['close'] * 100, 2) if row_p['close'] else 0
-        arrow = '▲' if ch >= 0 else '▼'
-        tag   = '（今日）' if i == len(recent)-1 else f'（-{len(recent)-1-i}日）'
-        trend_lines.append(f'  {d} {arrow} {c:,.1f} 元 {("+" if ch>=0 else "")}{ch}% {tag}')
 
     # 乖離率與入場建議
     bias = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
@@ -247,14 +242,8 @@ def analyze_stock(sid):
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
         chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
 
-    # 連買天數（抓過去5天T86）
+    # 連買天數：已移除（資料來源不可靠）
     consec = {}
-    if hasattr(sb, 'fetch_consecutive_buy'):
-        try:
-            date_str_now = sb.get_target_date('auto')
-            consec = sb.fetch_consecutive_buy(sid, date_str_now, n=5)
-        except Exception as _ce:
-            consec = {'score': 0, 'label': ''}
 
     # 融資增幅
     margin = {}
@@ -265,62 +254,44 @@ def analyze_stock(sid):
         except Exception as _me:
             margin = {'score': 0, 'label': ''}
 
-    sign = '+' if diff >= 0 else ''
-    msg  = (
-        f'🔍 **{sid}**\n'
-        f'💰 收盤價：**{price:,.1f} 元**　{sign}{diff:.1f}（{sign}{change}%）\n'
-        f'📊 量比：**{vol_ratio}x**\n'
-        f'📉 EMA 排列：{trend} {ema_lv}\n'
-    )
+    # ── 組裝輸出（完全對齊每日分析格式）──
+    sign    = '+' if diff >= 0 else ''
+    ema_tag = '(備援EMA)' if ema_mode == 'fallback' else ''
+    lines   = [
+        f'🔍 **{sid}**',
+        f'🔹收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio}x{ema_tag}',
+    ]
     if foreign is not None:
-        msg += f'👥 外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股\n'
-    if trend_lines:
-        msg += '\n📅 **近3交易日走勢**\n' + '\n'.join(trend_lines) + '\n'
+        lines.append(f'🔹外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股')
+
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
-        msg += (
-            f'\n📐 乖離率（10日）：{sp}{bias["bias_pct"]}%　{bias["bias_emoji"]} {bias["bias_label"]}\n'
-            f'💡 建議入場：{bias["entry_price"]:,.1f} 元\n'
-            f'🎯 目標一：{bias["target1"]:,.1f} 元　目標二：{bias["target2"]:,.1f} 元\n'
-        )
-    # ATR 動態停損
+        lines.append(f"📐 乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
+        lines.append(f"💡 建議入場：{bias['entry_price']:,.1f} 元")
+        lines.append(f"🎯 目標一：{bias['target1']:,.1f} 元　目標二：{bias['target2']:,.1f} 元")
+
     if adv.get('atr_stop'):
-        msg += f'⛔ 動態停損（2×ATR）：{adv["atr_stop"]:,.1f} 元（{adv["atr_pct"]}%）\n'
+        lines.append(f"⛔ 動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     elif bias:
-        msg += f'⛔ 停損參考：{bias["stop_loss"]:,.1f} 元（-5%）\n'
-    # 進階指標
+        lines.append(f"⛔ 停損參考：{bias['stop_loss']:,.1f} 元（-5%）")
+
     if adv.get('rsi_label'):
-        msg += f'📊 RSI：{adv["rsi_label"]}\n'
+        lines.append(f"📊 RSI：{adv['rsi_label']}")
     if adv.get('resistance_label'):
-        msg += f'🏔 壓力位：{adv["resistance_label"]}\n'
+        lines.append(f"🏔 壓力位：{adv['resistance_label']}")
     if adv.get('position_label'):
-        msg += f'📍 位階：{adv["position_label"]}\n'
+        lines.append(f"📍 位階：{adv['position_label']}")
     if adv.get('obv_label'):
-        msg += f'📦 OBV：{adv["obv_label"]}\n'
+        lines.append(f"📦 OBV：{adv['obv_label']}")
     if chip.get('label') and chip.get('score', 0) > 0:
-        msg += f'💎 籌碼集中度：{chip["label"]}\n'
-    if consec.get('label'):
-        msg += f'📅 法人連買：{consec["label"]}\n'
+        lines.append(f"💎 籌碼：{chip['label']}")
     if margin.get('label'):
-        msg += f'💳 融資狀況：{margin["label"]}\n'
+        lines.append(f"💳 融資：{margin['label']}")
 
-    msg += (
-        f'\n⭐ **推薦度：{star_str(stars)}**\n'
-        f'📝 {rec}\n'
-    )
+    lines.append(f'\n⭐ **推薦度：{star_str(stars)}**')
+    lines.append(f'📝 {rec}')
 
-    msg += (
-        '\n━━━━━━━━━━━━━━━━━━━━━━━━\n'
-        '📖 **指標速查**\n'
-        '📐 乖離率：0~5% 理想　5~8% 略高　>8% 勿追\n'
-        '📊 RSI：60~80 強勢　>80 過熱　<50 動能弱\n'
-        '🏔 壓力位：接近歷史高點時小心賣壓\n'
-        '📍 位階：距低點越遠追高風險越高\n'
-        '📦 OBV：量價同步才是健康的漲\n'
-        '⛔ 動態停損：跌破此價建議出場\n'
-        '━━━━━━━━━━━━━━━━━━━━━━━━'
-    )
-    return msg
+    return '\n'.join(lines)
 
 # ══════════════════════════════════════════════════════
 # /topbuyer /topseller
