@@ -182,33 +182,70 @@ def analyze_stock(sid):
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
         chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
 
-    # ── 推薦度（星級）──
-    stars = 0.0
-    if is_bull:
-        stars += 1.5 if ema_mode == 'full' else 1.0
-    if vol_ratio >= 2.0:   stars += 1.0
-    elif vol_ratio >= 1.5: stars += 0.5
-    if change >= 3.5:      stars += 0.5
-    elif change >= 1.0:    stars += 0.25
-    elif change < -1.0:    stars -= 0.5
-    if foreign is not None:
-        if foreign > 100000:   stars += 1.0
-        elif foreign > 50000:  stars += 0.5
-        elif foreign > 0:      stars += 0.25
-    if trust is not None:
-        if trust > 50000:  stars += 0.5
-        elif trust > 10000: stars += 0.25
-    if chip.get('score', 0) >= 10: stars += 0.5
-    elif chip.get('score', 0) >= 5: stars += 0.25
-    rsi = adv.get('rsi')
-    if rsi and 60 <= rsi <= 80: stars += 0.25
-    if adv.get('position_score', 0) < -0.5: stars -= 0.5
-    stars = round(max(0, min(5, stars)), 1)
+    # ── 積分制評分（與每日分析完全相同）──
+    _entry = {
+        'change':    change,
+        'vol_ratio': vol_ratio,
+        'foreign':   foreign or 0,
+        'trust':     trust or 0,
+        'bias':      bias,
+        'adv':       adv,
+        'chip_score': chip.get('score', 0),
+        'market_score': 0,
+        'margin_score': 0,
+    }
+    # 積分計算（複製 calc_score 邏輯）
+    _s = 0
+    if   change >= 7:   _s += 25
+    elif change >= 5:   _s += 20
+    elif change >= 3.5: _s += 15
+    elif change >= 2:   _s += 10
+    elif change >= 1:   _s += 5
+    if   vol_ratio >= 3.0: _s += 20
+    elif vol_ratio >= 2.0: _s += 15
+    elif vol_ratio >= 1.5: _s += 10
+    elif vol_ratio >= 1.2: _s += 5
+    _fg, _tr = (foreign or 0), (trust or 0)
+    _tot  = _fg + _tr
+    _both = _fg >= 10000 and _tr >= 10000
+    if _both and _tot >= 500000:   _s += 20
+    elif _both and _tot >= 100000: _s += 15
+    elif _both:                    _s += 10
+    elif _tot >= 100000:           _s += 8
+    else:                          _s += 3
+    _bp = bias.get('bias_pct') if bias else None
+    if _bp is None:        _s += 8
+    elif 0 <= _bp <= 5:    _s += 15
+    elif _bp < 0:          _s += 10
+    elif _bp <= 8:         _s += 5
+    _rsi = adv.get('rsi')
+    if _rsi is None:       _s += 5
+    elif 60 <= _rsi <= 80: _s += 10
+    elif _rsi > 80:        _s += 8
+    elif _rsi >= 50:       _s += 5
+    _rs = adv.get('resistance_score', 0)
+    if _rs == 0:           _s += 5
+    elif _rs == -0.25:     _s += 2
+    _ps = adv.get('position_score', 0)
+    if _ps >= 0.5:         _s += 5
+    elif _ps == 0:         _s += 3
+    elif _ps == -0.5:      _s += 1
+    _cc = chip.get('score', 0)
+    if _cc >= 8:   _s += 8
+    elif _cc >= 5: _s += 5
+    elif _cc >= 2: _s += 2
+    score = max(0, _s)
 
-    if stars >= 4:   rec = '強力推薦，法人站台、趨勢向上，可追蹤布局。'
-    elif stars >= 3: rec = '條件不錯，但需確認大盤配合，可小量觀察。'
-    elif stars >= 2: rec = '訊號普通，建議等待更明確突破再進場。'
-    else:            rec = '條件偏弱，暫時觀望，等待法人明確進場。'
+    # 積分轉等級
+    if   score >= 85: grade, grade_emoji = 'SS', '🔥'
+    elif score >= 68: grade, grade_emoji = 'S',  '💎'
+    elif score >= 52: grade, grade_emoji = 'A',  '📈'
+    else:             grade, grade_emoji = None,  ''
+
+    if   score >= 85: rec = '各項指標多數達標，可考慮進場布局。'
+    elif score >= 68: rec = '條件不錯但非最佳，小量試水溫。'
+    elif score >= 52: rec = '訊號普通，建議等待更明確訊號再進場。'
+    else:             rec = '條件偏弱，暫時觀望。'
 
     # ── 組裝輸出（與每日分析格式一致）──
     sign    = '+' if diff >= 0 else ''
@@ -246,7 +283,10 @@ def analyze_stock(sid):
             lines.append(f"OBV：{adv['obv_label']}")
         if chip.get('label') and chip.get('score', 0) > 0:
             lines.append(f"籌碼：{chip['label']}")
-    lines += ['', f'⭐ **推薦度：{star_str(stars)}**', f'📝 {rec}']
+    if grade:
+        lines += ['', f'{grade_emoji} **【{grade} {score}分】**', f'📝 {rec}']
+    else:
+        lines += ['', f'📝 {rec}（積分 {score} 分，未達推薦門檻）']
     return '\n'.join(lines)
 
 
