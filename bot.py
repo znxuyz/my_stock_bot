@@ -1336,5 +1336,16 @@ if __name__ == '__main__':
 
     register_commands()
     threading.Thread(target=scheduler, daemon=True).start()
+
+    # Bot 啟動時自動匯出一次 Dashboard（讓 redeploy 後立刻同步歷史資料）
+    def _startup_export():
+        time.sleep(5)  # 等資料庫連線穩定
+        try:
+            import web_export as _we
+            _we.export_dashboard()
+        except Exception as _e:
+            print(f"[Web] 啟動時 Dashboard 匯出失敗：{_e}")
+    threading.Thread(target=_startup_export, daemon=True).start()
+
     print(f"[Bot] 已啟動，監聽 port {PORT}")
     ThreadingHTTPServer(('0.0.0.0', PORT), InteractionHandler).serve_forever()
