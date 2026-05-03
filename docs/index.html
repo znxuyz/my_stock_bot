@@ -51,6 +51,9 @@
   .grade-S {background:#58a6ff33;color:#79c0ff;border:1px solid #58a6ff66}
   .grade-A {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
   .grade-X {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
+  .fill-filled  {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
+  .fill-missed  {background:#f8514933;color:#ffa198;border:1px solid #f8514966}
+  .fill-pending {background:#8b949e33;color:#c9d1d9;border:1px solid #8b949e66}
   .status-win{color:var(--green);font-weight:600}
   .status-loss{color:var(--red);font-weight:600}
   .status-pending{color:var(--muted)}
@@ -59,11 +62,9 @@
   .scroll{overflow-x:auto;max-height:75vh}
   .empty{padding:30px;text-align:center;color:var(--muted)}
   .filter-row{display:flex;gap:10px;align-items:center;margin-bottom:10px;flex-wrap:wrap}
-  input[type=search],select{
+  input[type=search],input[type=date],select{
     background:var(--panel2);color:var(--text);border:1px solid var(--border);
     padding:6px 10px;border-radius:6px;font-size:13px}
-  .bar{height:6px;background:var(--panel2);border-radius:3px;overflow:hidden;margin-top:4px}
-  .bar > span{display:block;height:100%;background:linear-gradient(90deg,var(--accent),var(--green))}
   footer{text-align:center;color:var(--muted);font-size:12px;padding:18px}
   .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);
     padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
@@ -72,7 +73,7 @@
 </head>
 <body>
 <header>
-  <h1>📈 台股量化戰報 <small>Dashboard</small></h1>
+  <h1>📈 台股量化戰報 <small>Dashboard v3 · 進場區間 + 雙勝率</small></h1>
   <div>
     <span id="updated" class="updated">載入中…</span>
     <button class="btn" onclick="reloadAll()" style="margin-left:10px">🔄 重新整理</button>
@@ -101,12 +102,15 @@
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>等級</th><th>代號</th><th>名稱</th>
+          <th>等級</th><th class="num">分數</th>
+          <th>代號</th><th>名稱</th>
           <th class="num">收盤</th><th class="num">漲幅</th><th class="num">量比</th>
-          <th class="num">外資(股)</th><th class="num">投信(股)</th>
-          <th class="num">乖離</th><th>進場區</th>
-          <th class="num">建議入場</th><th class="num">目標一</th><th class="num">目標二</th>
-          <th class="num">停損</th><th class="num">建議倉位</th>
+          <th class="num">乖離</th><th>進場區評語</th>
+          <th class="num">建議進場區</th>
+          <th>T+1 撮合</th>
+          <th class="num">實際進場</th>
+          <th class="num">目標+5%</th><th class="num">目標+10%</th><th class="num">停損-5%</th>
+          <th class="num">建議倉位</th>
         </tr></thead>
         <tbody id="today-tbody"></tbody>
       </table></div>
@@ -119,13 +123,19 @@
       <div class="filter-row">
         <h2 style="margin:0;flex:1">每檔結算狀態（最近 90 天）</h2>
         <input type="search" id="status-search" placeholder="搜尋代號或名稱…" oninput="renderStatus()">
+        <select id="status-fill" onchange="renderStatus()">
+          <option value="">全部撮合狀態</option>
+          <option value="filled">已進場</option>
+          <option value="missed">未進場</option>
+          <option value="pending">待撮合</option>
+        </select>
         <select id="status-filter" onchange="renderStatus()">
-          <option value="">全部狀態</option>
+          <option value="">全部結算結果</option>
           <option value="pending">未結算</option>
-          <option value="win">勝</option>
-          <option value="loss">敗</option>
+          <option value="win">賺錢</option>
+          <option value="loss">虧損</option>
           <option value="target">命中目標</option>
-          <option value="stop">觸及停損</option>
+          <option value="stop">觸停損</option>
         </select>
         <select id="status-grade" onchange="renderStatus()">
           <option value="">全部等級</option>
@@ -135,9 +145,13 @@
       <div class="scroll"><table>
         <thead><tr>
           <th>篩選日</th><th>等級</th><th>代號</th><th>名稱</th>
-          <th class="num">當日收盤</th><th class="num">入場</th><th class="num">目標一</th><th class="num">目標二</th><th class="num">停損</th>
+          <th class="num">當日收盤</th>
+          <th class="num">建議進場區</th>
+          <th>T+1 撮合</th>
+          <th class="num">實際進場</th>
+          <th class="num">目標一</th><th class="num">目標二</th><th class="num">停損</th>
           <th class="num">1週後</th><th class="num">2週後</th>
-          <th>狀態</th>
+          <th>結算結果</th>
         </tr></thead>
         <tbody id="status-tbody"></tbody>
       </table></div>
@@ -149,13 +163,14 @@
     <div class="grid grid-4" id="stats-summary"></div>
     <div class="grid grid-2">
       <div class="panel">
-        <h2>依等級勝率</h2>
+        <h2>依等級勝率（進場率 + 賺錢勝率）</h2>
         <div class="scroll"><table>
           <thead><tr>
-            <th>等級</th><th class="num">總數</th>
-            <th class="num">1週勝率</th><th class="num">1週均報酬</th>
-            <th class="num">2週勝率</th><th class="num">2週均報酬</th>
-            <th class="num">命中目標</th><th class="num">觸停損</th>
+            <th>等級</th><th class="num">總篩選</th>
+            <th class="num">進場率</th>
+            <th class="num">1週賺錢勝率</th><th class="num">1週均報酬</th>
+            <th class="num">2週賺錢勝率</th><th class="num">2週均報酬</th>
+            <th class="num">命中T1/T2</th><th class="num">觸停損</th>
           </tr></thead>
           <tbody id="stats-grade-tbody"></tbody>
         </table></div>
@@ -194,13 +209,20 @@
           <option value="">全部等級</option>
           <option>SS</option><option>S</option><option>A</option>
         </select>
+        <select id="history-fill" onchange="renderHistory()">
+          <option value="">全部撮合狀態</option>
+          <option value="filled">已進場</option>
+          <option value="missed">未進場</option>
+          <option value="pending">待撮合</option>
+        </select>
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>篩選日</th><th>等級</th><th>代號</th><th>名稱</th>
-          <th class="num">收盤</th><th class="num">漲幅</th><th class="num">量比</th>
-          <th class="num">乖離</th><th class="num">入場</th>
-          <th class="num">1週</th><th class="num">2週</th><th>狀態</th>
+          <th>篩選日</th><th>等級</th><th class="num">分數</th>
+          <th>代號</th><th>名稱</th>
+          <th class="num">收盤</th><th class="num">漲幅</th><th class="num">乖離</th>
+          <th>T+1 撮合</th><th class="num">實際進場</th>
+          <th class="num">1週</th><th class="num">2週</th><th>結算結果</th>
         </tr></thead>
         <tbody id="history-tbody"></tbody>
       </table></div>
@@ -209,7 +231,7 @@
 </div>
 
 <footer>
-  資料每個交易日盤後（17:00 後）由 Bot 自動更新 ·
+  資料每個交易日盤後（17:00 後）由 Bot 自動更新；T+1 撮合在隔日盤後寫入 ·
   <a href="https://github.com/znxuyz/my_stock_bot" target="_blank">原始碼</a>
 </footer>
 
@@ -235,21 +257,24 @@ function fmtPct(n, sign=true){
   const s = sign && v>=0 ? '+' : '';
   return s + v.toFixed(2) + '%';
 }
-function fmtShares(n){
-  if(n===null || n===undefined || n==='') return '-';
-  const v = Number(n);
-  if(isNaN(v)) return '-';
-  if(Math.abs(v)>=1e6) return (v/1e6).toFixed(1)+'M';
-  if(Math.abs(v)>=1e3) return (v/1e3).toFixed(0)+'K';
-  return String(v);
-}
 function clsPct(n){ if(n===null||n===undefined||n==='') return 'neu'; const v=Number(n); return v>0?'pos':v<0?'neg':'neu'; }
-function gradePill(g){ return `<span class="pill grade-${g}">${g}</span>`; }
+function gradePill(g){ return `<span class="pill grade-${g}">${g||'-'}</span>`; }
+function fillPill(s){
+  if(s==='filled') return '<span class="pill fill-filled">✅進場</span>';
+  if(s==='missed') return '<span class="pill fill-missed">❌未進場</span>';
+  return '<span class="pill fill-pending">⏳待撮合</span>';
+}
+function zone(lo, hi){
+  if(lo===null||hi===null) return '-';
+  return `${fmt(lo,1)} ~ ${fmt(hi,1)}`;
+}
 
 function statusOf(rec){
+  if(rec.fill_status === 'missed') return {key:'pending', label:'未進場', cls:'status-pending'};
+  if(rec.fill_status === 'pending') return {key:'pending', label:'待撮合', cls:'status-pending'};
   if(rec.hit_stoploss) return {key:'stop', label:'觸停損', cls:'status-stop'};
-  if(rec.hit_target2)  return {key:'target', label:'命中目標2', cls:'status-target'};
-  if(rec.hit_target1)  return {key:'target', label:'命中目標1', cls:'status-target'};
+  if(rec.hit_target2)  return {key:'target', label:'命中T2', cls:'status-target'};
+  if(rec.hit_target1)  return {key:'target', label:'命中T1', cls:'status-target'};
   if(rec.settle1_done){
     const v = Number(rec.settle1_pct);
     return v>0 ? {key:'win', label:'勝', cls:'status-win'} : {key:'loss', label:'敗', cls:'status-loss'};
@@ -276,7 +301,6 @@ async function loadAll(){
 
 function reloadAll(){ loadAll(); }
 
-// ── Tabs ───────────────────────────────────
 document.querySelectorAll('.tab').forEach(btn=>{
   btn.addEventListener('click',()=>{
     document.querySelectorAll('.tab').forEach(b=>b.classList.remove('active'));
@@ -286,12 +310,11 @@ document.querySelectorAll('.tab').forEach(btn=>{
   });
 });
 
-// ── 今日 ──────────────────────────────────
 function renderToday(){
   const data = STATE.today;
   const tbody = document.getElementById('today-tbody');
   const sumDiv = document.getElementById('today-summary');
-  if(!data){ tbody.innerHTML='<tr><td colspan="15" class="empty">尚無資料</td></tr>'; sumDiv.innerHTML=''; return; }
+  if(!data){ tbody.innerHTML='<tr><td colspan="16" class="empty">尚無資料</td></tr>'; sumDiv.innerHTML=''; return; }
   document.getElementById('today-date').textContent = data.screen_date ? '（'+data.screen_date+'）' : '';
   const recs = data.records || [];
   const counts = {SS:0,S:0,A:0};
@@ -312,39 +335,41 @@ function renderToday(){
     }
     return true;
   });
-  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="15" class="empty">無符合條件的股票</td></tr>'; return; }
+  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="16" class="empty">無符合條件的股票</td></tr>'; return; }
   tbody.innerHTML = filtered.map(r=>`
     <tr>
       <td>${gradePill(r.grade)}</td>
+      <td class="num">${r.score!=null?r.score:'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>
       <td class="num">${fmt(r.close_price)}</td>
       <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
       <td class="num">${fmt(r.vol_ratio,1)}x</td>
-      <td class="num ${clsPct(r.foreign_shares)}">${fmtShares(r.foreign_shares)}</td>
-      <td class="num ${clsPct(r.trust_shares)}">${fmtShares(r.trust_shares)}</td>
       <td class="num ${clsPct(r.bias_pct)}">${fmtPct(r.bias_pct)}</td>
       <td>${r.bias_label||'-'}</td>
-      <td class="num">${fmt(r.entry_price)}</td>
-      <td class="num pos">${fmt(r.target1)}</td>
-      <td class="num pos">${fmt(r.target2)}</td>
-      <td class="num neg">${fmt(r.stop_loss)}</td>
+      <td class="num">${zone(r.entry_zone_low, r.entry_zone_high)}</td>
+      <td>${fillPill(r.fill_status)}</td>
+      <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
+      <td class="num pos">${fmt(r.actual_target1)}</td>
+      <td class="num pos">${fmt(r.actual_target2)}</td>
+      <td class="num neg">${fmt(r.actual_stop_loss)}</td>
       <td class="num">${r.position_pct?r.position_pct+'%':'-'}</td>
     </tr>
   `).join('');
 }
 
-// ── 結算狀態 ───────────────────────────────
 function renderStatus(){
   const tbody = document.getElementById('status-tbody');
   const data = STATE.history;
-  if(!data){ tbody.innerHTML='<tr><td colspan="12" class="empty">尚無資料</td></tr>'; return; }
+  if(!data){ tbody.innerHTML='<tr><td colspan="14" class="empty">尚無資料</td></tr>'; return; }
   const recs = data.records || [];
   const q = (document.getElementById('status-search').value||'').toLowerCase().trim();
+  const fs = document.getElementById('status-fill').value;
   const f = document.getElementById('status-filter').value;
   const g = document.getElementById('status-grade').value;
   const filtered = recs.filter(r=>{
     if(g && r.grade!==g) return false;
+    if(fs && r.fill_status!==fs) return false;
     if(q){
       const txt = (r.sid+' '+r.name).toLowerCase();
       if(!txt.includes(q)) return false;
@@ -355,7 +380,7 @@ function renderStatus(){
     }
     return true;
   });
-  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="12" class="empty">無符合條件的紀錄</td></tr>'; return; }
+  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="14" class="empty">無符合條件的紀錄</td></tr>'; return; }
   tbody.innerHTML = filtered.map(r=>{
     const st = statusOf(r);
     return `
@@ -365,10 +390,12 @@ function renderStatus(){
         <td><b>${r.sid}</b></td>
         <td>${r.name||''}</td>
         <td class="num">${fmt(r.close_price)}</td>
-        <td class="num">${fmt(r.entry_price)}</td>
-        <td class="num pos">${fmt(r.target1)}</td>
-        <td class="num pos">${fmt(r.target2)}</td>
-        <td class="num neg">${fmt(r.stop_loss)}</td>
+        <td class="num">${zone(r.entry_zone_low, r.entry_zone_high)}</td>
+        <td>${fillPill(r.fill_status)}</td>
+        <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
+        <td class="num pos">${fmt(r.actual_target1)}</td>
+        <td class="num pos">${fmt(r.actual_target2)}</td>
+        <td class="num neg">${fmt(r.actual_stop_loss)}</td>
         <td class="num ${clsPct(r.settle1_pct)}">${r.settle1_done?fmtPct(r.settle1_pct):'-'}</td>
         <td class="num ${clsPct(r.settle2_pct)}">${r.settle2_done?fmtPct(r.settle2_pct):'-'}</td>
         <td class="${st.cls}">${st.label}</td>
@@ -376,7 +403,6 @@ function renderStatus(){
   }).join('');
 }
 
-// ── 勝率統計 ───────────────────────────────
 function renderStats(){
   const data = STATE.stats;
   const sumDiv = document.getElementById('stats-summary');
@@ -384,41 +410,51 @@ function renderStats(){
   const bT = document.getElementById('stats-bias-tbody');
   const mT = document.getElementById('stats-monthly-tbody');
   if(!data){
-    sumDiv.innerHTML=''; gT.innerHTML=bT.innerHTML=mT.innerHTML='<tr><td colspan="8" class="empty">尚無資料</td></tr>';
+    sumDiv.innerHTML=''; gT.innerHTML=bT.innerHTML=mT.innerHTML='<tr><td colspan="9" class="empty">尚無資料</td></tr>';
     return;
   }
   const s = data.summary || {};
+  const total   = Number(s.total)||0;
+  const filled  = Number(s.filled)||0;
+  const missed  = Number(s.missed)||0;
+  const pending = Number(s.pending)||0;
+  const decided = filled + missed;
+  const fillRate = decided>0 ? filled/decided*100 : 0;
   const wr1 = (s.settled1>0)? (Number(s.win1)/Number(s.settled1)*100):0;
   const wr2 = (s.settled2>0)? (Number(s.win2)/Number(s.settled2)*100):0;
   sumDiv.innerHTML = `
     <div class="stat">
-      <div class="label">累積篩選數</div>
-      <div class="value">${fmtInt(s.total||0)}</div>
-      <div class="sub">已結算 ${fmtInt(s.settled1||0)} / ${fmtInt(s.settled2||0)}（1週/2週）</div>
+      <div class="label">總篩選數</div>
+      <div class="value">${fmtInt(total)}</div>
+      <div class="sub">已進場 ${fmtInt(filled)}　未進場 ${fmtInt(missed)}　待撮合 ${fmtInt(pending)}</div>
     </div>
     <div class="stat">
-      <div class="label">1 週勝率</div>
+      <div class="label">進場率</div>
+      <div class="value ${fillRate>=50?'pos':'neg'}">${fillRate.toFixed(1)}%</div>
+      <div class="sub">${fmtInt(filled)} / ${fmtInt(decided)}（已撮合）</div>
+    </div>
+    <div class="stat">
+      <div class="label">1 週賺錢勝率</div>
       <div class="value ${wr1>=50?'pos':'neg'}">${wr1.toFixed(1)}%</div>
       <div class="sub">${fmtInt(s.win1||0)}/${fmtInt(s.settled1||0)}　均報酬 ${fmtPct(s.avg_ret1)}</div>
     </div>
     <div class="stat">
-      <div class="label">2 週勝率</div>
+      <div class="label">2 週賺錢勝率</div>
       <div class="value ${wr2>=50?'pos':'neg'}">${wr2.toFixed(1)}%</div>
       <div class="sub">${fmtInt(s.win2||0)}/${fmtInt(s.settled2||0)}　均報酬 ${fmtPct(s.avg_ret2)}</div>
-    </div>
-    <div class="stat">
-      <div class="label">最佳 / 最差（1 週）</div>
-      <div class="value"><span class="pos">${fmtPct(s.best_ret1)}</span> / <span class="neg">${fmtPct(s.worst_ret1)}</span></div>
     </div>
   `;
   const grade = data.by_grade || [];
   gT.innerHTML = grade.length ? grade.map(r=>{
-    const t=Number(r.total)||0, s1=Number(r.settled1)||0, s2=Number(r.settled2)||0;
+    const t=Number(r.total)||0, fi=Number(r.filled)||0, mi=Number(r.missed)||0;
+    const fr = (fi+mi)>0 ? fi/(fi+mi)*100 : 0;
+    const s1=Number(r.settled1)||0, s2=Number(r.settled2)||0;
     const w1=Number(r.win1)||0, w2=Number(r.win2)||0;
     const wr1=s1?w1/s1*100:0, wr2=s2?w2/s2*100:0;
     return `<tr>
       <td>${gradePill(r.grade)}</td>
       <td class="num">${t}</td>
+      <td class="num ${fr>=50?'pos':'neg'}">${fr.toFixed(1)}%<br><span class="sub">${fi}/${fi+mi}</span></td>
       <td class="num ${wr1>=50?'pos':'neg'}">${wr1.toFixed(1)}%<br><span class="sub">${w1}/${s1}</span></td>
       <td class="num ${clsPct(r.avg_ret1)}">${fmtPct(r.avg_ret1)}</td>
       <td class="num ${wr2>=50?'pos':'neg'}">${wr2.toFixed(1)}%<br><span class="sub">${w2}/${s2}</span></td>
@@ -426,7 +462,7 @@ function renderStats(){
       <td class="num pos">${fmtInt(r.hit_t1)} / ${fmtInt(r.hit_t2)}</td>
       <td class="num neg">${fmtInt(r.hit_sl)}</td>
     </tr>`;
-  }).join('') : '<tr><td colspan="8" class="empty">尚無已結算資料</td></tr>';
+  }).join('') : '<tr><td colspan="9" class="empty">尚無已結算資料</td></tr>';
 
   const bias = data.by_bias || [];
   bT.innerHTML = bias.length ? bias.map(r=>{
@@ -454,17 +490,18 @@ function renderStats(){
   }).join('') : '<tr><td colspan="5" class="empty">尚無資料</td></tr>';
 }
 
-// ── 歷史紀錄 ───────────────────────────────
 function renderHistory(){
   const tbody = document.getElementById('history-tbody');
   const data = STATE.history;
-  if(!data){ tbody.innerHTML='<tr><td colspan="12" class="empty">尚無資料</td></tr>'; return; }
+  if(!data){ tbody.innerHTML='<tr><td colspan="13" class="empty">尚無資料</td></tr>'; return; }
   const recs = data.records || [];
   const q = (document.getElementById('history-search').value||'').toLowerCase().trim();
   const d = document.getElementById('history-date').value;
   const g = document.getElementById('history-grade').value;
+  const fs = document.getElementById('history-fill').value;
   const filtered = recs.filter(r=>{
     if(g && r.grade!==g) return false;
+    if(fs && r.fill_status!==fs) return false;
     if(d && r.screen_date !== d) return false;
     if(q){
       const txt = (r.sid+' '+r.name).toLowerCase();
@@ -472,28 +509,28 @@ function renderHistory(){
     }
     return true;
   });
-  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="12" class="empty">無符合條件的紀錄</td></tr>'; return; }
+  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="13" class="empty">無符合條件的紀錄</td></tr>'; return; }
   tbody.innerHTML = filtered.slice(0, 500).map(r=>{
     const st = statusOf(r);
     return `<tr>
       <td>${r.screen_date||''}</td>
       <td>${gradePill(r.grade)}</td>
+      <td class="num">${r.score!=null?r.score:'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>
       <td class="num">${fmt(r.close_price)}</td>
       <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
-      <td class="num">${fmt(r.vol_ratio,1)}x</td>
       <td class="num ${clsPct(r.bias_pct)}">${fmtPct(r.bias_pct)}</td>
-      <td class="num">${fmt(r.entry_price)}</td>
+      <td>${fillPill(r.fill_status)}</td>
+      <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
       <td class="num ${clsPct(r.settle1_pct)}">${r.settle1_done?fmtPct(r.settle1_pct):'-'}</td>
       <td class="num ${clsPct(r.settle2_pct)}">${r.settle2_done?fmtPct(r.settle2_pct):'-'}</td>
       <td class="${st.cls}">${st.label}</td>
     </tr>`;
-  }).join('') + (filtered.length>500?`<tr><td colspan="12" class="empty">已顯示前 500 筆，共 ${filtered.length} 筆，請使用篩選縮小範圍</td></tr>`:'');
+  }).join('') + (filtered.length>500?`<tr><td colspan="13" class="empty">已顯示前 500 筆，共 ${filtered.length} 筆，請使用篩選縮小範圍</td></tr>`:'');
 }
 
 loadAll();
-// 每 5 分鐘自動 reload（盤後 17:00 後即可看到當天結果）
 setInterval(loadAll, 5*60*1000);
 </script>
 </body>
