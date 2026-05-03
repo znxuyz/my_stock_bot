@@ -311,6 +311,162 @@ def get_total_screened(guild_id):
             return cur.fetchone()[0]
 
 # ══════════════════════════════════════════════════
+# 跨伺服器彙總（給 Web Dashboard 使用）
+#   因為所有 guild 的 screen_records 內容相同（同一份篩選結果存多份），
+#   彙總時用 DISTINCT ON (screen_date, sid) 避免重複計算。
+# ══════════════════════════════════════════════════
+def get_latest_screen_date():
+    """取得最近一次篩選日期（任一 guild）"""
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT MAX(screen_date) FROM screen_records")
+            row = cur.fetchone()
+            return row[0] if row and row[0] else None
+
+def get_screens_by_date(screen_date):
+    """取得指定日期的所有篩選股票（去除 guild 重複）"""
+    sql = """
+    SELECT DISTINCT ON (sid)
+        screen_date, sid, name, grade, close_price, change_pct,
+        vol_ratio, foreign_shares, trust_shares, bias_pct, bias_label,
+        entry_price, target1, target2, stop_loss, position_pct,
+        settle1_date, settle2_date, settle1_price, settle2_price,
+        settle1_pct, settle2_pct, settle1_done, settle2_done,
+        hit_target1, hit_target2, hit_stoploss
+    FROM screen_records
+    WHERE screen_date = %s
+    ORDER BY sid, id
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (screen_date,))
+            return cur.fetchall()
+
+def get_history_records(limit_days=90):
+    """取得最近 N 天的所有篩選紀錄（去除 guild 重複），給歷史頁使用"""
+    sql = """
+    SELECT DISTINCT ON (screen_date, sid)
+        screen_date, sid, name, grade, close_price, change_pct,
+        vol_ratio, bias_pct, entry_price, target1, target2, stop_loss,
+        settle1_pct, settle2_pct, settle1_done, settle2_done,
+        hit_target1, hit_target2, hit_stoploss
+    FROM screen_records
+    WHERE screen_date >= CURRENT_DATE - %s::int
+    ORDER BY screen_date DESC, sid, id
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (limit_days,))
+            return cur.fetchall()
+
+def get_aggregated_stats():
+    """跨伺服器彙總勝率（依等級分組）"""
+    grade_sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid)
+            grade, settle1_pct, settle2_pct, settle1_done, settle2_done,
+            hit_target1, hit_target2, hit_stoploss
+        FROM screen_records
+        ORDER BY screen_date, sid, id
+    )
+    SELECT grade,
+        COUNT(*) AS total,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled1,
+        SUM(CASE WHEN settle2_done THEN 1 ELSE 0 END) AS settled2,
+        SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win1,
+        SUM(CASE WHEN settle2_pct > 0 THEN 1 ELSE 0 END) AS win2,
+        AVG(settle1_pct) AS avg_ret1,
+        AVG(settle2_pct) AS avg_ret2,
+        SUM(CASE WHEN hit_target1 THEN 1 ELSE 0 END) AS hit_t1,
+        SUM(CASE WHEN hit_target2 THEN 1 ELSE 0 END) AS hit_t2,
+        SUM(CASE WHEN hit_stoploss THEN 1 ELSE 0 END) AS hit_sl
+    FROM dedup
+    GROUP BY grade
+    ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
+                        WHEN 'A' THEN 3 WHEN 'X' THEN 4 ELSE 5 END
+    """
+    bias_sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid)
+            bias_pct, settle1_pct, settle1_done
+        FROM screen_records
+        WHERE bias_pct IS NOT NULL
+        ORDER BY screen_date, sid, id
+    )
+    SELECT
+        CASE WHEN bias_pct < 0  THEN '底部(<0%)'
+             WHEN bias_pct <= 5 THEN '理想(0-5%)'
+             WHEN bias_pct <= 8 THEN '略高(5-8%)'
+             ELSE '過高(>8%)' END AS bias_zone,
+        COUNT(*) AS total,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled,
+        SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
+        AVG(settle1_pct) AS avg_ret
+    FROM dedup
+    GROUP BY bias_zone
+    ORDER BY bias_zone
+    """
+    monthly_sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid)
+            screen_date, settle1_pct, settle1_done
+        FROM screen_records
+        ORDER BY screen_date, sid, id
+    )
+    SELECT
+        TO_CHAR(screen_date, 'YYYY-MM') AS ym,
+        COUNT(*) AS total,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled,
+        SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
+        AVG(settle1_pct) AS avg_ret
+    FROM dedup
+    GROUP BY ym
+    ORDER BY ym DESC
+    LIMIT 12
+    """
+    out = {'grade': [], 'bias': [], 'monthly': []}
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(grade_sql);   out['grade']   = list(cur.fetchall())
+                cur.execute(bias_sql);    out['bias']    = list(cur.fetchall())
+                cur.execute(monthly_sql); out['monthly'] = list(cur.fetchall())
+    except Exception as e:
+        import traceback
+        print(f"[DB] get_aggregated_stats 錯誤：{e}\n{traceback.format_exc()}")
+    return out
+
+def get_aggregated_summary():
+    """總覽數字：總篩選數、總結算數、總勝場、平均報酬"""
+    sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid)
+            settle1_pct, settle2_pct, settle1_done, settle2_done
+        FROM screen_records
+        ORDER BY screen_date, sid, id
+    )
+    SELECT
+        COUNT(*)::int AS total,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END)::int AS settled1,
+        SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END)::int AS win1,
+        AVG(settle1_pct) AS avg_ret1,
+        SUM(CASE WHEN settle2_done THEN 1 ELSE 0 END)::int AS settled2,
+        SUM(CASE WHEN settle2_pct > 0 THEN 1 ELSE 0 END)::int AS win2,
+        AVG(settle2_pct) AS avg_ret2,
+        MAX(settle1_pct) AS best_ret1,
+        MIN(settle1_pct) AS worst_ret1
+    FROM dedup
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql)
+                return cur.fetchone() or {}
+    except Exception as e:
+        print(f"[DB] get_aggregated_summary 錯誤：{e}")
+        return {}
+
+# ══════════════════════════════════════════════════
 # 持倉（guild 隔離）
 # ══════════════════════════════════════════════════
 def get_holdings(guild_id, user_id):
