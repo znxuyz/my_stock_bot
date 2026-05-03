@@ -175,12 +175,15 @@ def analyze_stock(sid):
         pass
 
     # ── 進階指標（需要 high/low）──
-    bias  = sb.calc_bias_and_entry(df_all, price) if hasattr(sb, 'calc_bias_and_entry') else None
-    adv   = sb.calc_advanced_indicators(df_all, price) if hasattr(sb, 'calc_advanced_indicators') else {}
-    chip  = {}
-    if foreign is not None and hasattr(sb, 'calc_chip_concentration'):
+    bias = sb.calc_bias_and_entry(df_all, price)
+    adv  = sb.calc_advanced_indicators(df_all, price)
+    macd = sb.calc_macd(df_all)
+    chip = {}
+    if foreign is not None:
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
         chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
+
+    consec = sb.count_consecutive_limit_ups(df_all)
 
     # ── 積分制評分（直接呼叫 sb.calc_score，與每日分析完全一致）──
     _entry = {
@@ -191,6 +194,7 @@ def analyze_stock(sid):
         'bias':         bias,
         'adv':          adv,
         'chip_score':   chip.get('score', 0),
+        'macd_score':   macd.get('macd_score', 5),
         'market_score': 0,
         'margin_score': 0,
         'consec_score': 0,
@@ -222,23 +226,38 @@ def analyze_stock(sid):
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
         lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
-    # 進場區間 [close × 0.97, close × 1.00]，T+1 觸到才算進場
-    zone_low  = round(price * 0.97, 1)
-    zone_high = round(price * 1.00, 1)
-    est_t1    = round(price * 1.05, 1)
-    est_t2    = round(price * 1.10, 1)
-    est_stop  = round(price * 0.95, 1)
-    lines += ['', '🎯建議進場區（限價單）',
-              f"進場區間：{zone_low:,.1f} ~ {zone_high:,.1f} 元",
-              f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%",
-              f"預估目標一：{est_t1:,.1f} 元　預估目標二：{est_t2:,.1f} 元　預估停損：{est_stop:,.1f} 元"]
+    # 連續漲停 → 顯示追漲檢查；否則顯示一般進場區間
+    if consec >= 3:
+        chase = sb.check_strong_chase(_entry, macd, _entry.get('market_score', 0))
+        if chase['passed'] >= 5:
+            zl = round(price * 1.00, 1); zh = round(price * 1.07, 1)
+            lines += ['', f"🚀強勢追漲（連續{consec}日漲停，5/5 條件達標）",
+                      f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍跳空 0~7%）",
+                      f"➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀"]
+        elif chase['passed'] >= 4:
+            lines += ['', f"⚠️觀察名單（連續{consec}日漲停但僅 {chase['passed']}/5 過）",
+                      '➡️ **不建議買進**，僅供觀察']
+            lines += [f"  {r}" for r in chase['reasons']]
+        else:
+            lines += ['', f"❌連續{consec}日漲停但僅 {chase['passed']}/5 過 — 風險過高，不推薦"]
+    else:
+        zl = round(price * 0.97, 1); zh = round(price * 1.00, 1)
+        est_t1   = round(price * 1.05, 1)
+        est_t2   = round(price * 1.10, 1)
+        est_stop = round(price * 0.95, 1)
+        lines += ['', '🎯建議進場區（限價單）',
+                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元",
+                  f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%",
+                  f"預估目標一：{est_t1:,.1f} 元　預估目標二：{est_t2:,.1f} 元　預估停損：{est_stop:,.1f} 元"]
     if adv.get('atr_stop'):
         lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
                    adv.get('position_label'), adv.get('obv_label'),
-                   chip.get('score', 0) > 0])
+                   chip.get('score', 0) > 0, macd.get('macd_label')])
     if has_adv:
         lines += ['', '📊輔助數據']
+        if macd.get('macd_label'):
+            lines.append(f"MACD：{macd['macd_label']}")
         if adv.get('rsi_label'):
             lines.append(f"RSI：{adv['rsi_label']}")
         if adv.get('resistance_label'):
