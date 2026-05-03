@@ -1,94 +1,17 @@
 {
-  "updated_at": "2026-05-03 17:16:09",
+  "updated_at": "2026-05-03 17:16:25",
   "summary": {
-    "total": 79,
-    "settled1": 47,
-    "win1": 21,
-    "avg_ret1": 0.49638297872340426,
-    "settled2": 0,
-    "win2": 0,
+    "total": 0,
+    "settled1": null,
+    "win1": null,
+    "avg_ret1": null,
+    "settled2": null,
+    "win2": null,
     "avg_ret2": null,
-    "best_ret1": 33.17,
-    "worst_ret1": -17.01
+    "best_ret1": null,
+    "worst_ret1": null
   },
-  "by_grade": [
-    {
-      "grade": "SS",
-      "total": 11,
-      "settled1": 9,
-      "settled2": 0,
-      "win1": 5,
-      "win2": 0,
-      "avg_ret1": 7.381111111111111,
-      "avg_ret2": null,
-      "hit_t1": 6,
-      "hit_t2": 6,
-      "hit_sl": 3
-    },
-    {
-      "grade": "S",
-      "total": 32,
-      "settled1": 16,
-      "settled2": 0,
-      "win1": 8,
-      "win2": 0,
-      "avg_ret1": -0.921875,
-      "avg_ret2": null,
-      "hit_t1": 7,
-      "hit_t2": 5,
-      "hit_sl": 4
-    },
-    {
-      "grade": "A",
-      "total": 36,
-      "settled1": 22,
-      "settled2": 0,
-      "win1": 8,
-      "win2": 0,
-      "avg_ret1": -1.2886363636363636,
-      "avg_ret2": null,
-      "hit_t1": 12,
-      "hit_t2": 10,
-      "hit_sl": 5
-    }
-  ],
-  "by_bias": [
-    {
-      "bias_zone": "底部(<0%)",
-      "total": 1,
-      "settled": 1,
-      "win": 1,
-      "avg_ret": 0.24
-    },
-    {
-      "bias_zone": "理想(0-5%)",
-      "total": 19,
-      "settled": 9,
-      "win": 4,
-      "avg_ret": -2.502222222222222
-    },
-    {
-      "bias_zone": "略高(5-8%)",
-      "total": 12,
-      "settled": 7,
-      "win": 1,
-      "avg_ret": -2.94
-    },
-    {
-      "bias_zone": "過高(>8%)",
-      "total": 47,
-      "settled": 30,
-      "win": 15,
-      "avg_ret": 2.2063333333333333
-    }
-  ],
-  "by_month": [
-    {
-      "ym": "2026-04",
-      "total": 79,
-      "settled": 47,
-      "win": 21,
-      "avg_ret": 0.49638297872340426
-    }
-  ]
+  "by_grade": [],
+  "by_bias": [],
+  "by_month": []
 }
