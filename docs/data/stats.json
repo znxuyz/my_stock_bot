@@ -1,7 +1,10 @@
 {
-  "updated_at": "2026-05-03 17:16:25",
+  "updated_at": "2026-05-03 17:16:34",
   "summary": {
     "total": 0,
+    "filled": null,
+    "missed": null,
+    "pending": null,
     "settled1": null,
     "win1": null,
     "avg_ret1": null,
