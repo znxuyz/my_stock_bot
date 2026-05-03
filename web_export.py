@@ -106,6 +106,17 @@ def build_payloads():
         },
     }
 
+    # config.json：給前端讀取 Bot 的公開 API 網址
+    api_url = (os.environ.get('BOT_PUBLIC_URL', '').strip().rstrip('/')
+               or os.environ.get('RAILWAY_PUBLIC_DOMAIN', '').strip().rstrip('/'))
+    if api_url and not api_url.startswith('http'):
+        api_url = 'https://' + api_url
+    payloads['config.json'] = {
+        'updated_at': updated_at,
+        'api_url':    api_url,
+        'schema':     'v4-macd-chase',
+    }
+
     # 外資買賣超榜（從 /tmp 快取讀；run_analysis 會在跑分析時寫入）
     if os.path.exists(TOP_FLOW_CACHE):
         try:
