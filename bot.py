@@ -97,7 +97,11 @@ def is_admin(body):
 # ══════════════════════════════════════════════════════
 # /stock 個股分析
 # ══════════════════════════════════════════════════════
-def analyze_stock(sid):
+def analyze_stock_data(sid):
+    """
+    完整個股分析（fetch K bars + 計算指標 + 評分）
+    回傳結構化 dict 供 Discord /stock 與 Web /api/stock 共用，失敗回 None。
+    """
     import pandas as pd
     sid = sid.strip().upper()
 
@@ -175,7 +179,7 @@ def analyze_stock(sid):
     except:
         pass
 
-    # ── 進階指標（需要 high/low）──
+    # ── 進階指標 ──
     bias = sb.calc_bias_and_entry(df_all, price)
     adv  = sb.calc_advanced_indicators(df_all, price)
     macd = sb.calc_macd(df_all)
@@ -186,7 +190,6 @@ def analyze_stock(sid):
 
     consec = sb.count_consecutive_limit_ups(df_all)
 
-    # ── 積分制評分（直接呼叫 sb.calc_score，與每日分析完全一致）──
     _entry = {
         'change':       change,
         'vol_ratio':    vol_ratio,
@@ -202,54 +205,96 @@ def analyze_stock(sid):
     }
     score = sb.calc_score(_entry)
 
-    # 積分轉等級
-    if   score >= 85: grade, grade_emoji = 'SS', '🔥'
-    elif score >= 68: grade, grade_emoji = 'S',  '💎'
-    elif score >= 52: grade, grade_emoji = 'A',  '📈'
-    else:             grade, grade_emoji = None,  ''
+    if   score >= 85: grade, grade_emoji, rec = 'SS', '🔥', '各項指標多數達標，可考慮進場布局。'
+    elif score >= 68: grade, grade_emoji, rec = 'S',  '💎', '條件不錯但非最佳，小量試水溫。'
+    elif score >= 52: grade, grade_emoji, rec = 'A',  '📈', '訊號普通，建議等待更明確訊號再進場。'
+    else:             grade, grade_emoji, rec = None, '',   '條件偏弱，暫時觀望。'
 
-    if   score >= 85: rec = '各項指標多數達標，可考慮進場布局。'
-    elif score >= 68: rec = '條件不錯但非最佳，小量試水溫。'
-    elif score >= 52: rec = '訊號普通，建議等待更明確訊號再進場。'
-    else:             rec = '條件偏弱，暫時觀望。'
+    # 連續漲停 → 計算追漲模式 / 區間
+    chase_mode = 'normal'
+    chase_check = None
+    if consec >= 3:
+        chase = sb.check_strong_chase(_entry, macd, _entry.get('market_score', 0))
+        chase_check = chase
+        if chase['passed'] >= 5:
+            chase_mode = 'strong_chase'
+        elif chase['passed'] >= 4:
+            chase_mode = 'watch'
+        else:
+            chase_mode = 'reject'
 
-    # ── 組裝輸出（與每日分析格式一致）──
-    sign    = '+' if diff >= 0 else ''
-    ema_tag = '(備援EMA)' if ema_mode == 'fallback' else ''
+    # 進場區間
+    if chase_mode == 'strong_chase':
+        zone_low, zone_high = round(price * 1.00, 1), round(price * 1.07, 1)
+    elif chase_mode in ('normal',):
+        zone_low, zone_high = round(price * 0.97, 1), round(price * 1.00, 1)
+    else:
+        zone_low = zone_high = None
+
+    return {
+        'sid':       sid,
+        'price':     round(price, 2),
+        'prev_close':round(prev_close, 2),
+        'diff':      round(diff, 2),
+        'change':    change,
+        'vol_ratio': round(float(vol_ratio), 2) if vol_ratio is not None else None,
+        'ema_mode':  ema_mode,
+        'foreign':   foreign,
+        'trust':     trust,
+        'bias':      bias,
+        'adv':       {k: v for k, v in adv.items() if not callable(v)},
+        'macd':      macd,
+        'chip':      chip,
+        'consec_limit_up': consec,
+        'chase_mode': chase_mode,
+        'chase_check': chase_check,
+        'entry_zone_low':  zone_low,
+        'entry_zone_high': zone_high,
+        'est_target1':     round(price * 1.05, 1),
+        'est_target2':     round(price * 1.10, 1),
+        'est_stop_loss':   round(price * 0.95, 1),
+        'score':     score,
+        'grade':     grade,
+        'grade_emoji': grade_emoji,
+        'rec':       rec,
+    }
+
+
+def format_stock_text(d):
+    """將 analyze_stock_data 的 dict 格式化成 Discord 顯示文字"""
+    if d is None:
+        return None
+    sign    = '+' if d['diff'] >= 0 else ''
+    ema_tag = '(備援EMA)' if d['ema_mode'] == 'fallback' else ''
+    bias    = d['bias']; adv = d['adv'] or {}; macd = d['macd'] or {}; chip = d['chip'] or {}
     lines   = [
-        f'🔍 **{sid}**',
+        f"🔍 **{d['sid']}**",
         '',
         '🔹基本資料',
-        f'收盤價格：{price:,.1f}　漲幅：{sign}{change}%　量比：{vol_ratio:.1f}x{ema_tag}',
+        f"收盤價格：{d['price']:,.1f}　漲幅：{sign}{d['change']}%　量比：{d['vol_ratio']:.1f}x{ema_tag}",
     ]
-    if foreign is not None:
-        lines.append(f'外資：{fmt_share(foreign)} 股　投信：{fmt_share(trust)} 股')
+    if d['foreign'] is not None:
+        lines.append(f"外資：{fmt_share(d['foreign'])} 股　投信：{fmt_share(d['trust'])} 股")
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
         lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
-    # 連續漲停 → 顯示追漲檢查；否則顯示一般進場區間
-    if consec >= 3:
-        chase = sb.check_strong_chase(_entry, macd, _entry.get('market_score', 0))
-        if chase['passed'] >= 5:
-            zl = round(price * 1.00, 1); zh = round(price * 1.07, 1)
-            lines += ['', f"🚀強勢追漲（連續{consec}日漲停，5/5 條件達標）",
-                      f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍跳空 0~7%）",
-                      f"➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀"]
-        elif chase['passed'] >= 4:
-            lines += ['', f"⚠️觀察名單（連續{consec}日漲停但僅 {chase['passed']}/5 過）",
-                      '➡️ **不建議買進**，僅供觀察']
-            lines += [f"  {r}" for r in chase['reasons']]
-        else:
-            lines += ['', f"❌連續{consec}日漲停但僅 {chase['passed']}/5 過 — 風險過高，不推薦"]
+    consec = d['consec_limit_up']
+    chase  = d['chase_check']
+    if d['chase_mode'] == 'strong_chase':
+        lines += ['', f"🚀強勢追漲（連續{consec}日漲停，5/5 條件達標）",
+                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元（容忍跳空 0~7%）",
+                  f"➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀"]
+    elif d['chase_mode'] == 'watch':
+        lines += ['', f"⚠️觀察名單（連續{consec}日漲停但僅 {chase['passed']}/5 過）",
+                  '➡️ **不建議買進**，僅供觀察']
+        lines += [f"  {r}" for r in chase.get('reasons', [])]
+    elif d['chase_mode'] == 'reject':
+        lines += ['', f"❌連續{consec}日漲停但僅 {chase['passed']}/5 過 — 風險過高，不推薦"]
     else:
-        zl = round(price * 0.97, 1); zh = round(price * 1.00, 1)
-        est_t1   = round(price * 1.05, 1)
-        est_t2   = round(price * 1.10, 1)
-        est_stop = round(price * 0.95, 1)
         lines += ['', '🎯建議進場區（限價單）',
-                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元",
+                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元",
                   f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%",
-                  f"預估目標一：{est_t1:,.1f} 元　預估目標二：{est_t2:,.1f} 元　預估停損：{est_stop:,.1f} 元"]
+                  f"預估目標一：{d['est_target1']:,.1f} 元　預估目標二：{d['est_target2']:,.1f} 元　預估停損：{d['est_stop_loss']:,.1f} 元"]
     if adv.get('atr_stop'):
         lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
@@ -257,23 +302,43 @@ def analyze_stock(sid):
                    chip.get('score', 0) > 0, macd.get('macd_label')])
     if has_adv:
         lines += ['', '📊輔助數據']
-        if macd.get('macd_label'):
-            lines.append(f"MACD：{macd['macd_label']}")
-        if adv.get('rsi_label'):
-            lines.append(f"RSI：{adv['rsi_label']}")
-        if adv.get('resistance_label'):
-            lines.append(f"壓力位：{adv['resistance_label']}")
-        if adv.get('position_label'):
-            lines.append(f"位階：{adv['position_label']}")
-        if adv.get('obv_label'):
-            lines.append(f"OBV：{adv['obv_label']}")
+        if macd.get('macd_label'):       lines.append(f"MACD：{macd['macd_label']}")
+        if adv.get('rsi_label'):         lines.append(f"RSI：{adv['rsi_label']}")
+        if adv.get('resistance_label'):  lines.append(f"壓力位：{adv['resistance_label']}")
+        if adv.get('position_label'):    lines.append(f"位階：{adv['position_label']}")
+        if adv.get('obv_label'):         lines.append(f"OBV：{adv['obv_label']}")
         if chip.get('label') and chip.get('score', 0) > 0:
             lines.append(f"籌碼：{chip['label']}")
-    if grade:
-        lines += ['', f'{grade_emoji} **【{grade} {score}分】**', f'📝 {rec}']
+    if d['grade']:
+        lines += ['', f"{d['grade_emoji']} **【{d['grade']} {d['score']}分】**", f"📝 {d['rec']}"]
     else:
-        lines += ['', f'📝 {rec}（積分 {score} 分，未達推薦門檻）']
+        lines += ['', f"📝 {d['rec']}（積分 {d['score']} 分，未達推薦門檻）"]
     return '\n'.join(lines)
+
+
+def analyze_stock(sid):
+    """Discord /stock 用的舊接口，回傳格式化後的文字（或 None）"""
+    data = analyze_stock_data(sid)
+    return format_stock_text(data)
+
+
+# ══════════════════════════════════════════════════════
+# /api/stock 快取（避免重複打 TWSE）
+# ══════════════════════════════════════════════════════
+_STOCK_API_CACHE = {}   # {sid: (timestamp, data)}
+_STOCK_API_CACHE_TTL = 3600  # 1 小時
+
+def stock_api_get(sid):
+    """帶 1 小時快取的個股查詢，給 /api/stock 用"""
+    now = time.time()
+    if sid in _STOCK_API_CACHE:
+        ts, data = _STOCK_API_CACHE[sid]
+        if now - ts < _STOCK_API_CACHE_TTL:
+            return data
+    data = analyze_stock_data(sid)
+    if data is not None:
+        _STOCK_API_CACHE[sid] = (now, data)
+    return data
 
 
 # ══════════════════════════════════════════════════════
@@ -712,15 +777,47 @@ def register_commands():
 class InteractionHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
 
-    def send_json(self, code, body):
-        data = json.dumps(body, ensure_ascii=False).encode('utf-8')
+    def send_json(self, code, body, cors=False):
+        data = json.dumps(body, ensure_ascii=False, default=str).encode('utf-8')
         self.send_response(code)
         self.send_header('Content-Type', 'application/json; charset=utf-8')
         self.send_header('Content-Length', len(data))
+        if cors:
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+            self.send_header('Cache-Control', 'public, max-age=300')
         self.end_headers()
         self.wfile.write(data)
 
+    def do_OPTIONS(self):
+        # CORS preflight
+        self.send_response(204)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.send_header('Access-Control-Max-Age', '600')
+        self.end_headers()
+
     def do_GET(self):
+        # 解析 path + query
+        from urllib.parse import urlparse, parse_qs
+        u  = urlparse(self.path)
+        qs = parse_qs(u.query or '')
+
+        # /api/stock?sid=2330 — 任意股票分析（給 Web Dashboard 用）
+        if u.path == '/api/stock':
+            sid = (qs.get('sid', [''])[0] or '').strip().upper()
+            if not sid or not sid.isalnum() or len(sid) > 6:
+                self.send_json(400, {'ok': False, 'error': '請提供有效的股票代號（最多 6 碼）'}, cors=True)
+                return
+            data = stock_api_get(sid)
+            if data is None:
+                self.send_json(404, {'ok': False, 'error': f'查無 {sid} 資料（代號錯誤或 TWSE 無資料）'}, cors=True)
+                return
+            self.send_json(200, {'ok': True, 'data': data}, cors=True)
+            return
+
+        # 預設 health check
         self.send_response(200)
         self.send_header('Content-Type', 'text/plain')
         self.end_headers()

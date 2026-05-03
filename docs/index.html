@@ -355,10 +355,23 @@
       <button class="modal-close" aria-label="關閉">✕</button>
     </div>
     <div class="modal-body">
-      <div class="placeholder">
-        <div class="icon">🔍</div>
-        <p><b>尚未實作</b></p>
-        <p>未來可輸入股票代號查看完整評分、進場區間與指標。</p>
+      <div id="stock-form" style="display:flex;gap:8px;align-items:center;margin-bottom:14px">
+        <input type="search" id="stock-input" placeholder="輸入股票代號（例 2330）"
+               style="flex:1;font-size:14px;padding:8px 12px"
+               maxlength="6" autocomplete="off">
+        <button class="btn" id="stock-search" style="padding:8px 16px">🔍 查詢</button>
+      </div>
+      <div id="stock-result"></div>
+      <div id="stock-config" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);
+                                     font-size:12px;color:var(--muted);display:none">
+        <b>📡 API 設定</b>
+        <p>Bot 公開網址未自動偵測到，請手動輸入（Railway 服務的 Public URL，例：<code>https://xxx.up.railway.app</code>）</p>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <input type="text" id="api-input" placeholder="https://your-bot.up.railway.app"
+                 style="flex:1;font-size:13px">
+          <button class="btn" id="api-save">儲存</button>
+        </div>
+        <p id="api-current" style="margin-top:8px"></p>
       </div>
     </div>
   </div>
@@ -393,7 +406,8 @@
 </div>
 
 <script>
-const STATE = { today:null, stats:null, history:null, topflow:null };
+const STATE = { today:null, stats:null, history:null, topflow:null, config:null };
+const API_KEY = 'stockbot_api_url';
 
 function fmt(n, digits=2){
   if(n===null || n===undefined || n==='') return '-';
@@ -448,19 +462,27 @@ function statusOf(rec){
 async function loadAll(){
   const setText = (sel,t)=>{ const e=document.querySelector(sel); if(e) e.textContent=t; };
   try{
-    const [t,s,h,tf] = await Promise.all([
+    const [t,s,h,tf,cf] = await Promise.all([
       fetch('./data/today.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
       fetch('./data/stats.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
       fetch('./data/history.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
       fetch('./data/topflow.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch('./data/config.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
     ]);
-    STATE.today = t; STATE.stats = s; STATE.history = h; STATE.topflow = tf;
+    STATE.today = t; STATE.stats = s; STATE.history = h; STATE.topflow = tf; STATE.config = cf;
     const u = (t && t.updated_at) || (s && s.updated_at) || (h && h.updated_at) || '尚未產生';
     setText('#updated','更新時間：'+u);
     renderToday(); renderStatus(); renderStats(); renderHistory(); renderTopFlow();
   }catch(e){
     setText('#updated','載入失敗：'+e.message);
   }
+}
+
+function getApiUrl(){
+  // 1) 先用 config.json 自動偵測；2) 退回 localStorage 手動設定
+  const fromCfg = (STATE.config && STATE.config.api_url || '').trim();
+  if(fromCfg) return fromCfg.replace(/\/+$/,'');
+  return (localStorage.getItem(API_KEY) || '').trim().replace(/\/+$/,'');
 }
 
 function reloadAll(){ loadAll(); }
@@ -774,10 +796,137 @@ setInterval(loadAll, 5*60*1000);
   function openModal(name){
     modals.forEach(m => m.hidden = (m.dataset.modalContent !== name));
     backdrop.classList.add('open');
+    if(name === 'stock') initStockModal();
   }
   function closeModal(){
     backdrop.classList.remove('open');
     modals.forEach(m => m.hidden = true);
+  }
+
+  // ── 個股查詢（呼叫 Bot 的 /api/stock）──
+  function initStockModal(){
+    const apiUrl = getApiUrl();
+    const cfg    = document.getElementById('stock-config');
+    const cur    = document.getElementById('api-current');
+    if(!apiUrl){
+      cfg.style.display = 'block';
+      cur.textContent = '⚠️ 目前未設定 API 網址';
+    } else {
+      cfg.style.display = 'none';
+      cur.textContent = '✅ 目前 API：' + apiUrl;
+    }
+    const inp = document.getElementById('api-input');
+    inp.value = localStorage.getItem(API_KEY) || '';
+  }
+  document.getElementById('api-save').addEventListener('click', () => {
+    const v = document.getElementById('api-input').value.trim();
+    if(v){ localStorage.setItem(API_KEY, v); }
+    else  { localStorage.removeItem(API_KEY); }
+    initStockModal();
+  });
+  document.getElementById('stock-search').addEventListener('click', queryStock);
+  document.getElementById('stock-input').addEventListener('keydown', e => {
+    if(e.key === 'Enter') queryStock();
+  });
+
+  async function queryStock(){
+    const sid = document.getElementById('stock-input').value.trim().toUpperCase();
+    const out = document.getElementById('stock-result');
+    if(!sid){ out.innerHTML = ''; return; }
+    if(!/^[0-9A-Z]{2,6}$/.test(sid)){
+      out.innerHTML = '<div class="placeholder neg">請輸入有效的股票代號（2~6 碼）</div>';
+      return;
+    }
+    const apiUrl = getApiUrl();
+    if(!apiUrl){
+      out.innerHTML = '<div class="placeholder neg">尚未設定 API 網址，請在下方填寫 Bot 的 Public URL</div>';
+      return;
+    }
+    out.innerHTML = '<div class="placeholder"><div class="icon">⏳</div>查詢中…約需 5~15 秒（首次需抓 6 個月 K 棒）</div>';
+    try{
+      const r = await fetch(`${apiUrl}/api/stock?sid=${encodeURIComponent(sid)}`);
+      const j = await r.json();
+      if(!j.ok){
+        out.innerHTML = `<div class="placeholder neg">${j.error || '查詢失敗'}</div>`;
+        return;
+      }
+      out.innerHTML = renderStockCard(j.data);
+    }catch(e){
+      out.innerHTML = `<div class="placeholder neg">連線失敗：${e.message}（檢查 API 網址或 Bot 是否在線）</div>`;
+    }
+  }
+
+  function renderStockCard(d){
+    const sign  = d.diff >= 0 ? '+' : '';
+    const chgCls = d.change > 0 ? 'pos' : d.change < 0 ? 'neg' : 'neu';
+    const bias = d.bias || {}; const adv = d.adv || {}; const macd = d.macd || {}; const chip = d.chip || {};
+    const gradeBadge = d.grade
+      ? `<span class="pill grade-${d.grade}">${d.grade_emoji} ${d.grade} ${d.score}分</span>`
+      : `<span class="pill" style="background:#8b949e33;color:#c9d1d9">未達門檻 (${d.score}分)</span>`;
+
+    let chaseHtml = '';
+    if(d.chase_mode === 'strong_chase'){
+      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#f85149">
+        <h4 style="margin:0 0 6px 0;color:#ffa198">🚀 強勢追漲（連續 ${d.consec_limit_up} 日漲停，5/5 達標）</h4>
+        <p style="margin:0">進場區間：<b>${d.entry_zone_low} ~ ${d.entry_zone_high}</b> 元（容忍跳空 0~7%）</p>
+        <p style="margin:6px 0 0 0;color:var(--muted);font-size:12px">T+1 開盤在區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀</p>
+      </div>`;
+    } else if(d.chase_mode === 'watch'){
+      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#d29922">
+        <h4 style="margin:0 0 6px 0;color:#f0c674">⚠️ 觀察名單（連續 ${d.consec_limit_up} 日漲停，僅 ${d.chase_check.passed}/5 過）</h4>
+        <p style="margin:0">不建議買進，僅供觀察</p>
+        <ul style="margin:6px 0 0 0;padding-left:18px;font-size:12px">${d.chase_check.reasons.map(r=>'<li>'+r+'</li>').join('')}</ul>
+      </div>`;
+    } else if(d.chase_mode === 'reject'){
+      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#f85149">
+        <h4 style="margin:0;color:#ffa198">❌ 連續 ${d.consec_limit_up} 日漲停但僅 ${d.chase_check.passed}/5 過 — 風險過高，不推薦</h4>
+      </div>`;
+    } else {
+      chaseHtml = `<div class="panel" style="margin-bottom:0">
+        <h4 style="margin:0 0 6px 0">🎯 建議進場區（限價單）</h4>
+        <p style="margin:0">進場區間：<b>${d.entry_zone_low} ~ ${d.entry_zone_high}</b> 元</p>
+        <p style="margin:4px 0 0 0">預估目標：<span class="pos">+${d.est_target1}</span> / <span class="pos">+${d.est_target2}</span>　預估停損：<span class="neg">${d.est_stop_loss}</span></p>
+        <p style="margin:6px 0 0 0;color:var(--muted);font-size:12px">隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5%/+10%、停損 -5%</p>
+      </div>`;
+    }
+
+    const fmtSh = n => {
+      if(n===null||n===undefined) return '-';
+      const v = Number(n); if(isNaN(v)) return '-';
+      const s = v>=0?'+':'';
+      if(Math.abs(v)>=1e6) return `${s}${(v/1e6).toFixed(2)}M`;
+      if(Math.abs(v)>=1e3) return `${s}${(v/1e3).toFixed(0)}K`;
+      return `${s}${v.toLocaleString('en-US')}`;
+    };
+
+    const advRows = [];
+    if(macd.macd_label) advRows.push(['MACD', macd.macd_label]);
+    if(adv.rsi_label)        advRows.push(['RSI',   adv.rsi_label]);
+    if(adv.resistance_label) advRows.push(['壓力位', adv.resistance_label]);
+    if(adv.position_label)   advRows.push(['位階',  adv.position_label]);
+    if(adv.obv_label)        advRows.push(['OBV',   adv.obv_label]);
+    if(chip.label && chip.score > 0) advRows.push(['籌碼', chip.label]);
+    if(adv.atr_stop)         advRows.push(['動態停損(2×ATR)', `${adv.atr_stop} 元（${adv.atr_pct}%）`]);
+
+    return `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <h3 style="margin:0">${d.sid}</h3>
+        ${gradeBadge}
+      </div>
+      <div class="panel" style="margin-bottom:12px">
+        <h4 style="margin:0 0 6px 0">🔹 基本資料</h4>
+        <p style="margin:0">收盤：<b>${d.price}</b>　漲幅：<span class="${chgCls}">${sign}${d.change}%</span>　量比：${d.vol_ratio}x${d.ema_mode==='fallback'?' (備援EMA)':''}</p>
+        ${d.foreign!=null?`<p style="margin:4px 0 0 0">外資：<span class="${d.foreign>0?'pos':'neg'}">${fmtSh(d.foreign)}</span> 股　投信：<span class="${d.trust>0?'pos':d.trust<0?'neg':'neu'}">${fmtSh(d.trust)}</span> 股</p>`:''}
+        ${bias.bias_pct!=null?`<p style="margin:4px 0 0 0">乖離率（10日）：<span class="${clsPct(bias.bias_pct)}">${bias.bias_pct>=0?'+':''}${bias.bias_pct}%</span> ${bias.bias_emoji||''} ${bias.bias_label||''}</p>`:''}
+      </div>
+      ${chaseHtml}
+      ${advRows.length?`
+        <div class="panel" style="margin-top:12px;margin-bottom:0">
+          <h4 style="margin:0 0 8px 0">📊 輔助數據</h4>
+          ${advRows.map(([k,v])=>`<p style="margin:3px 0">${k}：${v}</p>`).join('')}
+        </div>`:''}
+      <p style="margin:14px 0 0 0;text-align:center;color:var(--muted);font-size:12px">📝 ${d.rec}</p>
+    `;
   }
 
   fabMain.addEventListener('click', toggleFab);
