@@ -130,6 +130,7 @@ def push_file_to_github(repo_path, content_str, commit_msg):
         return False, 'GITHUB_TOKEN / GITHUB_REPO 未設定，跳過上傳'
 
     api_path = f'/repos/{GITHUB_REPO}/contents/{repo_path}'
+    full_url = f'{GITHUB_API}{api_path}'
     # 先查 sha（更新需要）
     sha = None
     try:
@@ -150,7 +151,41 @@ def push_file_to_github(repo_path, content_str, commit_msg):
     r = _gh_request('PUT', api_path, json=body)
     if r.status_code in (200, 201):
         return True, r.json().get('commit', {}).get('sha', '')
-    return False, f'HTTP {r.status_code}: {r.text[:200]}'
+    return False, f'HTTP {r.status_code} URL={full_url} BRANCH={GITHUB_BRANCH} body={r.text[:300]}'
+
+
+def _diag():
+    """印出當前 GitHub 設定供 debug（Token 只顯示前後 4 碼）"""
+    token_disp = ''
+    if GITHUB_TOKEN:
+        token_disp = (GITHUB_TOKEN[:8] + '...' + GITHUB_TOKEN[-4:]
+                      if len(GITHUB_TOKEN) > 16 else f'len={len(GITHUB_TOKEN)}')
+    print(f'[Web] 設定 → REPO={GITHUB_REPO!r} BRANCH={GITHUB_BRANCH!r} '
+          f'TOKEN={token_disp!r} (len={len(GITHUB_TOKEN)})')
+    if not GITHUB_TOKEN:
+        return
+    # 試打 /user 確認 token 有效、認證身份
+    try:
+        r = _gh_request('GET', '/user')
+        if r.status_code == 200:
+            who = r.json().get('login', '?')
+            print(f'[Web] Token 有效，身份 = {who}')
+        else:
+            print(f'[Web] Token /user 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+    except Exception as e:
+        print(f'[Web] Token /user 測試例外：{e}')
+    # 試打 /repos/{REPO} 確認 token 看得到此 repo
+    try:
+        r = _gh_request('GET', f'/repos/{GITHUB_REPO}')
+        if r.status_code == 200:
+            j = r.json()
+            print(f'[Web] Repo 可存取 → full_name={j.get("full_name")} '
+                  f'default_branch={j.get("default_branch")} '
+                  f'permissions={j.get("permissions")}')
+        else:
+            print(f'[Web] Repo 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+    except Exception as e:
+        print(f'[Web] Repo 測試例外：{e}')
 
 
 def push_payloads(payloads):
@@ -177,6 +212,7 @@ def push_payloads(payloads):
 def export_dashboard():
     """主入口：盤後篩選完成後呼叫一次"""
     try:
+        _diag()
         payloads = build_payloads()
         write_local(payloads)
         push_payloads(payloads)
