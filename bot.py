@@ -182,59 +182,20 @@ def analyze_stock(sid):
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
         chip = sb.calc_chip_concentration(foreign or 0, trust or 0, vol_last)
 
-    # ── 積分制評分（與每日分析完全相同）──
+    # ── 積分制評分（直接呼叫 sb.calc_score，與每日分析完全一致）──
     _entry = {
-        'change':    change,
-        'vol_ratio': vol_ratio,
-        'foreign':   foreign or 0,
-        'trust':     trust or 0,
-        'bias':      bias,
-        'adv':       adv,
-        'chip_score': chip.get('score', 0),
+        'change':       change,
+        'vol_ratio':    vol_ratio,
+        'foreign':      foreign or 0,
+        'trust':        trust or 0,
+        'bias':         bias,
+        'adv':          adv,
+        'chip_score':   chip.get('score', 0),
         'market_score': 0,
         'margin_score': 0,
+        'consec_score': 0,
     }
-    # 積分計算（複製 calc_score 邏輯）
-    _s = 0
-    if   change >= 7:   _s += 25
-    elif change >= 5:   _s += 20
-    elif change >= 3.5: _s += 15
-    elif change >= 2:   _s += 10
-    elif change >= 1:   _s += 5
-    if   vol_ratio >= 3.0: _s += 20
-    elif vol_ratio >= 2.0: _s += 15
-    elif vol_ratio >= 1.5: _s += 10
-    elif vol_ratio >= 1.2: _s += 5
-    _fg, _tr = (foreign or 0), (trust or 0)
-    _tot  = _fg + _tr
-    _both = _fg >= 10000 and _tr >= 10000
-    if _both and _tot >= 500000:   _s += 20
-    elif _both and _tot >= 100000: _s += 15
-    elif _both:                    _s += 10
-    elif _tot >= 100000:           _s += 8
-    else:                          _s += 3
-    _bp = bias.get('bias_pct') if bias else None
-    if _bp is None:        _s += 8
-    elif 0 <= _bp <= 5:    _s += 15
-    elif _bp < 0:          _s += 10
-    elif _bp <= 8:         _s += 5
-    _rsi = adv.get('rsi')
-    if _rsi is None:       _s += 5
-    elif 60 <= _rsi <= 80: _s += 10
-    elif _rsi > 80:        _s += 8
-    elif _rsi >= 50:       _s += 5
-    _rs = adv.get('resistance_score', 0)
-    if _rs == 0:           _s += 5
-    elif _rs == -0.25:     _s += 2
-    _ps = adv.get('position_score', 0)
-    if _ps >= 0.5:         _s += 5
-    elif _ps == 0:         _s += 3
-    elif _ps == -0.5:      _s += 1
-    _cc = chip.get('score', 0)
-    if _cc >= 8:   _s += 8
-    elif _cc >= 5: _s += 5
-    elif _cc >= 2: _s += 2
-    score = max(0, _s)
+    score = sb.calc_score(_entry)
 
     # 積分轉等級
     if   score >= 85: grade, grade_emoji = 'SS', '🔥'
@@ -261,13 +222,18 @@ def analyze_stock(sid):
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
         lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
-        lines += ['', '🎯價格建議',
-                  f"建議入場：{bias['entry_price']:,.1f} 元",
-                  f"目標一：{bias['target1']:,.1f} 元　目標二：{bias['target2']:,.1f} 元"]
+    # 進場區間 [close × 0.97, close × 1.00]，T+1 觸到才算進場
+    zone_low  = round(price * 0.97, 1)
+    zone_high = round(price * 1.00, 1)
+    est_t1    = round(price * 1.05, 1)
+    est_t2    = round(price * 1.10, 1)
+    est_stop  = round(price * 0.95, 1)
+    lines += ['', '🎯建議進場區（限價單）',
+              f"進場區間：{zone_low:,.1f} ~ {zone_high:,.1f} 元",
+              f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%",
+              f"預估目標一：{est_t1:,.1f} 元　預估目標二：{est_t2:,.1f} 元　預估停損：{est_stop:,.1f} 元"]
     if adv.get('atr_stop'):
-        lines.append(f"動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
-    elif bias:
-        lines.append(f"停損參考：{bias['stop_loss']:,.1f} 元（-5%）")
+        lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
     has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
                    adv.get('position_label'), adv.get('obv_label'),
                    chip.get('score', 0) > 0])
@@ -1166,40 +1132,51 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
     print(f"[結算] {settle_date} 第{round_num}次結算完成，{len(results)} 筆")
 
 def cmd_report(guild_id='dm'):
-    """取得最近一次結算的報告摘要"""
+    """累積統計摘要：進場率 + 賺錢勝率"""
     if not _DB_OK:
         return '❌ 資料庫未連接。'
     try:
-        grade_rows, bias_rows, dual_rows = _db.get_cumulative_stats(guild_id)
+        grade_rows, bias_rows, _ = _db.get_cumulative_stats(guild_id)
         total_n = _db.get_total_screened(guild_id)
         if total_n == 0:
             return 'ℹ️ 尚無任何篩選記錄，等每日分析跑完後才會有資料。'
-        lines = [f'📊 **累積統計（共 {total_n} 筆）**\n']
+        lines = [f'📊 **累積統計（共 {total_n} 筆）**',
+                 '進場率 = T+1 觸及進場區間的比例；賺錢勝率 = 已進場中賺錢的比例\n']
         if grade_rows:
-            lines.append('**各等級勝率（第1週）：**')
+            lines.append('**各等級指標：**')
             for g in grade_rows:
-                w = int(g["win1"] or 0); t = int(g["total"])
-                if t == 0: continue
-                wr = round(w/t*100, 1)
+                t  = int(g["total"])
+                fi = int(g["filled"] or 0); mi = int(g["missed"] or 0)
+                decided = fi + mi
+                fr = round(fi/decided*100, 1) if decided else 0
+                w1 = int(g["win1"] or 0); s1 = int(g["settled1"] or 0)
+                wr = round(w1/s1*100, 1) if s1 else 0
                 ar = round(float(g["avg_ret1"] or 0), 2)
-                s  = '+' if ar >= 0 else ''
-                lines.append(f'  {g["grade"]} 級：勝率 {wr}%（{w}/{t}）　平均 {s}{ar}%')
+                sgn= '+' if ar >= 0 else ''
+                lines.append(
+                    f'  {g["grade"]} 級（{t} 筆）：進場率 {fr}%（{fi}/{decided}）　'
+                    f'1週賺錢勝率 {wr}%（{w1}/{s1}）　均報酬 {sgn}{ar}%'
+                )
         if bias_rows:
-            lines.append('\n**乖離率勝率：**')
+            lines.append('\n**依乖離率：**')
             for b in bias_rows:
-                w = int(b["win"] or 0); t = int(b["total"])
-                if t == 0: continue
-                wr = round(w/t*100, 1)
+                fi = int(b["filled"] or 0); mi = int(b["missed"] or 0)
+                decided = fi + mi
+                fr = round(fi/decided*100, 1) if decided else 0
+                w  = int(b["win"] or 0); st = int(b["settled"] or 0)
+                wr = round(w/st*100, 1) if st else 0
                 ar = round(float(b["avg_ret"] or 0), 2)
-                s  = '+' if ar >= 0 else ''
-                lines.append(f'  {b["bias_zone"]}：{wr}%　平均 {s}{ar}%')
+                sgn= '+' if ar >= 0 else ''
+                lines.append(
+                    f'  {b["bias_zone"]}：進場率 {fr}%　賺錢勝率 {wr}%　均報酬 {sgn}{ar}%'
+                )
         return '\n'.join(lines)
     except Exception as e:
         import traceback
         return f'❌ 查詢失敗：{e}\n```\n{traceback.format_exc()[-500:]}\n```'
 
 def cmd_stats(guild_id='dm'):
-    """詳細統計 + 修正建議"""
+    """詳細統計 + 修正建議（含法人組合的進場率與勝率）"""
     if not _DB_OK:
         return '❌ 資料庫未連接。'
     try:
@@ -1208,31 +1185,62 @@ def cmd_stats(guild_id='dm'):
         if total_n == 0:
             return 'ℹ️ 尚無任何篩選記錄。'
         lines = [f'📈 **詳細統計（累積 {total_n} 筆）**\n']
-        lines.append('**法人組合勝率：**')
+        lines.append('**法人組合：**')
         for d in dual_rows:
-            w = int(d["win"] or 0); t = int(d["total"])
+            t  = int(d["total"])
             if t == 0: continue
-            wr = round(w/t*100, 1)
+            fi = int(d["filled"] or 0); mi = int(d["missed"] or 0)
+            decided = fi + mi
+            fr = round(fi/decided*100, 1) if decided else 0
+            w  = int(d["win"] or 0); st = int(d["settled"] or 0)
+            wr = round(w/st*100, 1) if st else 0
             ar = round(float(d["avg_ret"] or 0), 2)
             s  = '+' if ar >= 0 else ''
-            lines.append(f'  {d["buy_type"]}：{wr}%（{w}/{t}）　平均 {s}{ar}%')
+            lines.append(
+                f'  {d["buy_type"]}（{t} 筆）：'
+                f'進場率 {fr}%　賺錢勝率 {wr}%　均報酬 {s}{ar}%'
+            )
+
+        lines.append('\n**命中目標 / 觸停損：**')
+        for g in grade_rows:
+            t = int(g["total"])
+            if t == 0: continue
+            ht1 = int(g["hit_t1"] or 0)
+            ht2 = int(g["hit_t2"] or 0)
+            hsl = int(g["hit_sl"] or 0)
+            fi  = int(g["filled"] or 0)
+            lines.append(
+                f'  {g["grade"]} 級：命中目標一 {ht1}/{fi}、'
+                f'命中目標二 {ht2}/{fi}、觸停損 {hsl}/{fi}'
+            )
+
         # 修正建議
         suggestions = []
         for g in grade_rows:
-            t = int(g["total"])
-            if t >= 10:
-                wr = int(g["win1"] or 0)/t*100
+            t  = int(g["total"])
+            fi = int(g["filled"] or 0); mi = int(g["missed"] or 0)
+            decided = fi + mi
+            if decided >= 10:
+                fr = fi/decided*100
+                if fr < 40:
+                    suggestions.append(
+                        f'・{g["grade"]} 級進場率僅 {fr:.0f}% (<40%)，'
+                        '建議放寬進場區間（例如改用 close × 0.95~1.00）'
+                    )
+            s1 = int(g["settled1"] or 0)
+            if s1 >= 10:
+                wr = int(g["win1"] or 0)/s1*100
                 ar = float(g["avg_ret1"] or 0)
                 if g["grade"] == "A" and wr < 50:
-                    suggestions.append('・A 級勝率 <50%，考慮提高門檻至 2%')
+                    suggestions.append('・A 級賺錢勝率 <50%，考慮提高分數門檻')
                 if g["grade"] == "SS" and wr > 70:
                     suggestions.append('・SS 級勝率良好（>70%），可考慮加大倉位')
                 if ar < -1:
                     suggestions.append(f'・{g["grade"]} 級平均報酬為負，需重新評估')
         for b in bias_rows:
-            t = int(b["total"])
-            if t >= 10 and b["bias_zone"] == "過高(>8%)" and int(b["win"] or 0)/t*100 < 40:
-                suggestions.append('・乖離率 >8% 勝率過低，建議加入硬過濾')
+            st = int(b["settled"] or 0)
+            if st >= 10 and b["bias_zone"] == "過高(>8%)" and int(b["win"] or 0)/st*100 < 40:
+                suggestions.append('・乖離率 >8% 賺錢勝率過低，建議加入硬過濾')
         if suggestions:
             lines.append('\n📋 **修正建議：**')
             lines += suggestions

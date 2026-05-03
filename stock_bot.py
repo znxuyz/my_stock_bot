@@ -747,33 +747,6 @@ def calc_bias_and_entry(df, price):
 # ══════════════════════════════════════════════════════
 # T+1 撮合：把 fill_status='pending' 的紀錄用 T+1 K 棒判定進場
 # ══════════════════════════════════════════════════════
-def _fetch_t1_kbar(sid, screen_date):
-    """
-    抓 screen_date 之後第一個交易日的 K 棒（T+1）。
-    回傳 dict: {date, open, high, low, close} 或 None。
-    """
-    if not _DB_OK:
-        return None
-    yyyymm = screen_date.strftime('%Y%m')
-    df = fetch_stock_day_fast(sid, yyyymm)
-    if df.empty:
-        return None
-    # 也可能 T+1 落在下個月（screen_date 接近月底時）
-    after = df[df['date'] > screen_date].copy()
-    if after.empty:
-        # 試下個月
-        next_month = (screen_date.replace(day=1) + timedelta(days=32)).strftime('%Y%m')
-        df2 = fetch_stock_day_fast(sid, next_month)
-        if df2.empty:
-            return None
-        after = df2[df2['date'] > screen_date].copy()
-    if after.empty:
-        return None
-    # 還需要 open；fetch_stock_day_fast 目前沒抓 open
-    # 從原始 df 取第一欄 reload 一次拿開盤
-    return None  # 暫位，下面用更完整的 helper 取代
-
-
 def _fetch_kbars_with_open(sid, yyyymm):
     """
     與 fetch_stock_day_fast 類似，但同時取 open（第 4 欄）。
