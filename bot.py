@@ -1297,6 +1297,12 @@ def scheduler():
                             time.sleep(1)
                             settle_weekly(_d, 2, gw['guild_id'])
                             time.sleep(1)
+                    # 結算後同步更新 Web Dashboard
+                    try:
+                        import web_export as _we
+                        _we.export_dashboard()
+                    except Exception as _we_e:
+                        print(f"[Web] 結算後 Dashboard 匯出失敗：{_we_e}")
                 threading.Thread(target=_do_settle, daemon=True).start()
         # 週五（weekday=4）21:00 自動結算挑戰
         if wd == 4 and h == 21 and mn == 0:

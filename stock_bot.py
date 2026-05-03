@@ -1193,6 +1193,13 @@ def run_analysis():
             except Exception as _dbe:
                 print(f"[DB] 寫入失敗：{_dbe}")
 
+            # 匯出至 Web Dashboard（GitHub Pages）
+            try:
+                import web_export as _we
+                _we.export_dashboard()
+            except Exception as _we_e:
+                print(f"[Web] Dashboard 匯出失敗：{_we_e}")
+
         total_elapsed = time.time() - t_start
         print(f"[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)}，總耗時={total_elapsed:.0f}秒")
 
