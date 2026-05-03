@@ -1024,10 +1024,17 @@ INDICATOR_GUIDE = """
 """
 
 def run_analysis():
+    """
+    執行盤後分析。
+    回傳 status 字串：
+      'success' - 完整跑完、有結果送出
+      'holiday' - 該日 TWSE 無資料（國定假日或尚未更新）
+      'fail'    - 中途發生例外
+    """
     # 允許只靠 DB webhook 運作（不強制要求環境變數）
     if not WEBHOOK_URL and not _DB_OK:
         print('[錯誤] 未設定 DISCORD_WEBHOOK 且資料庫未連線，無法發送')
-        return
+        return 'fail'
 
     run_mode = os.environ.get('RUN_MODE', 'auto').strip().lower()
     date_str = get_target_date(run_mode)
@@ -1115,7 +1122,7 @@ def run_analysis():
                 pass
         for _wh in _all_wh:
             requests.post(_wh, json={'content': f'⚠️ {_market_env["label"]}'}, timeout=10)
-        return
+        return 'success'
 
         # ── 大盤外資歷史（近3天），用於環境過濾 ──
         _mkt_foreign_hist = []
@@ -1168,7 +1175,7 @@ def run_analysis():
                     pass
             for _wh in _all_wh:
                 requests.post(_wh, json={'content': f'⚠️ {_market_env["label"]}'}, timeout=10)
-            return
+            return 'success'
 
 
     r_inst = safe_get(
@@ -1184,39 +1191,32 @@ def run_analysis():
 
     if r_inst is None or r_price is None:
         which = 'T86(法人)' if r_inst is None else 'MI_INDEX(價格)'
-        requests.post(WEBHOOK_URL, json={
-            'content': (
-                f'❌ 無法取得個股資料（{date_str}）\n'
-                f'失敗來源：{which}\n'
-                f'已重試 5 次，可能是 TWSE 暫時封鎖海外 IP，請稍後用 /run 手動重試。'
-            )
-        }, timeout=15)
-        return
+        _notify_all(
+            f'❌ 無法取得個股資料（{date_str}）\n'
+            f'失敗來源：{which}\n'
+            f'已重試 5 次，可能是 TWSE 暫時封鎖海外 IP（系統會在 1 小時後自動重試）'
+        )
+        return 'fail'
     if '查詢無資料' in r_inst.text or '查詢無資料' in r_price.text:
-        requests.post(WEBHOOK_URL, json={'content': f'ℹ️ {date_str} 查無資料（假日或尚未更新）。'}, timeout=15)
-        return
+        # 國定假日或尚未更新 — 靜默跳過，不騷擾 Discord
+        print(f'[假日] {date_str} TWSE 無資料，跳過分析')
+        return 'holiday'
 
     try:
         # ── 解析 T86 ──
         df_i = parse_t86(r_inst.text)
         if df_i.empty:
-            requests.post(WEBHOOK_URL, json={
-                'content': f'❌ T86 解析失敗（{date_str}）\n前300字：\n{r_inst.text[:300]}'
-            }, timeout=15)
-            return
+            _notify_all(f'❌ T86 解析失敗（{date_str}）（將自動重試）')
+            return 'fail'
 
         # parse_t86 已用固定索引解析，欄位名稱固定為 _foreign/_trust/_total
-        # 先確認欄位存在
         for required_col in ['_foreign', '_trust', '_total']:
             if required_col not in df_i.columns:
-                requests.post(WEBHOOK_URL, json={
-                    'content': (
-                        f'❌ T86 欄位 {required_col} 不存在（{date_str}）\n'
-                        f'現有欄位：{list(df_i.columns)}\n'
-                        f'T86前300字：\n{r_inst.text[:300]}'
-                    )
-                }, timeout=15)
-                return
+                _notify_all(
+                    f'❌ T86 欄位 {required_col} 不存在（{date_str}）\n'
+                    f'現有欄位：{list(df_i.columns)}'
+                )
+                return 'fail'
 
         col_foreign = '_foreign'
         col_trust   = '_trust'
@@ -1225,10 +1225,8 @@ def run_analysis():
 
         # 數據驗證：外資和投信不應同時全為0
         if (df_i['_foreign'] == 0).all() and (df_i['_trust'] == 0).all():
-            requests.post(WEBHOOK_URL, json={
-                'content': f'❌ T86 法人數據異常（外資+投信全為0），請查看 Actions log。'
-            }, timeout=15)
-            return
+            _notify_all('❌ T86 法人數據異常（外資+投信全為0）（將自動重試）')
+            return 'fail'
 
         # ── 解析 MI_INDEX ──
         price_text = r_price.text
@@ -1236,15 +1234,13 @@ def run_analysis():
         if start_idx == -1:
             start_idx = price_text.find('證券代號')
         if start_idx == -1:
-            requests.post(WEBHOOK_URL, json={
-                'content': f'❌ MI_INDEX 找不到表頭（{date_str}）\n前300字：{price_text[:300]}'
-            }, timeout=15)
-            return
+            _notify_all(f'❌ MI_INDEX 找不到表頭（{date_str}）（將自動重試）')
+            return 'fail'
 
         df_p = safe_read_csv(price_text[start_idx:], 'MI_INDEX-PRICE', min_cols=5)
         if df_p.empty:
-            requests.post(WEBHOOK_URL, json={'content': f'❌ MI_INDEX 解析失敗（{date_str}）。'}, timeout=15)
-            return
+            _notify_all(f'❌ MI_INDEX 解析失敗（{date_str}）（將自動重試）')
+            return 'fail'
 
         df_p = df_p.dropna(thresh=5)
         df_p['sid_clean'] = clean_sid(df_p.iloc[:, 0])
@@ -1604,12 +1600,13 @@ def run_analysis():
                     time.sleep(0.5)
             time.sleep(1)
 
-
+        return 'success'
 
     except Exception as e:
         import traceback
         print(f"[主程式錯誤]\n{traceback.format_exc()}")
-        _notify_all(f'❌ 系統錯誤：{e}')
+        _notify_all(f'❌ 系統錯誤：{e}（將在 1 小時後自動重試）')
+        return 'fail'
 
 if __name__ == '__main__':
     run_analysis()

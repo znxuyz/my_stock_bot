@@ -43,7 +43,8 @@ def save_data(d):
         pass
 
 db       = load_data()
-last_run = {'time': None, 'mode': None, 'date': None, 'status': None, 'error': None}
+last_run = {'time': None, 'mode': None, 'date': None, 'status': None,
+            'error': None, 'attempt': 0}
 
 # ══════════════════════════════════════════════════════
 # Ed25519 驗證
@@ -901,9 +902,14 @@ class InteractionHandler(BaseHTTPRequestHandler):
                                          'date': sb.get_target_date(mode), 'status': 'running', 'error': None})
                         try:
                             os.environ['RUN_MODE'] = mode
-                            sb.run_analysis()
-                            last_run['status'] = 'success'
-                            req.patch(followup, json={'content': f'✅ **{ml}** 分析完成，結果已發送至頻道。'}, timeout=10)
+                            status = sb.run_analysis() or 'success'
+                            last_run['status'] = status
+                            if status == 'success':
+                                req.patch(followup, json={'content': f'✅ **{ml}** 分析完成，結果已發送至頻道。'}, timeout=10)
+                            elif status == 'holiday':
+                                req.patch(followup, json={'content': f'ℹ️ {last_run["date"]} 為國定假日或 TWSE 尚未更新資料，已跳過分析。'}, timeout=10)
+                            else:
+                                req.patch(followup, json={'content': f'❌ 執行失敗（status={status}），請查看 log。'}, timeout=10)
                         except Exception as e:
                             last_run['status'] = 'error'; last_run['error'] = str(e)
                             req.patch(followup, json={'content': f'❌ 執行失敗：{e}'}, timeout=10)
@@ -1333,17 +1339,50 @@ def settle_challenge():
             _db.clear_challenges(gw['guild_id'], week_key)
     print(f"[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽")
 
+MAX_RETRY_ATTEMPTS = 3   # 17:00 失敗後最多重試次數
+RETRY_HOURS        = [18, 19, 20]  # 重試時間點
+
+def _run_analysis_with_status(attempt=0):
+    """包一層：跑完更新 last_run.status，方便 scheduler 判斷是否重試"""
+    try:
+        status = sb.run_analysis()
+    except Exception as e:
+        status = 'fail'
+        print(f'[排程] run_analysis 例外：{e}')
+    last_run['time']   = tw_now()
+    last_run['date']   = tw_now().date()
+    last_run['mode']   = os.environ.get('RUN_MODE', 'auto')
+    last_run['status'] = status or 'fail'
+    last_run['attempt']= attempt
+    print(f'[排程] run_analysis 結果：status={last_run["status"]} attempt={attempt}')
+
+
 def scheduler():
     fired = set()
     while True:
         now = tw_now()
         h, wd, mn = now.hour, now.weekday(), now.minute
+        # 17:00 第一次嘗試
         if wd < 5 and h == 17 and mn == 0:
             k = (now.date(), 'close')
             if k not in fired:
                 fired.add(k)
                 os.environ['RUN_MODE'] = 'auto'
-                threading.Thread(target=sb.run_analysis, daemon=True).start()
+                threading.Thread(target=_run_analysis_with_status,
+                                 kwargs={'attempt': 0}, daemon=True).start()
+        # 18/19/20 點：若今日狀態為 fail 才補跑（最多 3 次）
+        if wd < 5 and h in RETRY_HOURS and mn == 0:
+            k_retry = (now.date(), f'retry-{h}')
+            if (k_retry not in fired
+                and last_run.get('date') == now.date()
+                and last_run.get('status') == 'fail'
+                and last_run.get('attempt', 0) < MAX_RETRY_ATTEMPTS):
+                fired.add(k_retry)
+                next_attempt = last_run.get('attempt', 0) + 1
+                print(f'[排程] 17:00 分析失敗，啟動第 {next_attempt} 次重試（{h}:00）')
+                os.environ['RUN_MODE'] = 'auto'
+                threading.Thread(target=_run_analysis_with_status,
+                                 kwargs={'attempt': next_attempt}, daemon=True).start()
         # 週五（weekday=4）18:00 自動結算週報（兩次）
         if wd == 4 and h == 18 and mn == 0:
             k = (now.date(), 'weekly_settle')
