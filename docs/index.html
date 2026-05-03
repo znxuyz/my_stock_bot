@@ -74,6 +74,63 @@
   .btn{background:var(--panel2);border:1px solid var(--border);color:var(--text);
     padding:6px 12px;border-radius:6px;cursor:pointer;font-size:13px}
   .btn:hover{background:var(--border)}
+
+  /* ── FAB（Floating Action Button） ──────────────────────────── */
+  .fab-container{position:fixed;right:24px;bottom:24px;z-index:1000;
+    display:flex;flex-direction:column-reverse;align-items:center;gap:14px}
+  .fab-main{width:56px;height:56px;border-radius:50%;
+    background:var(--accent);color:#fff;border:none;cursor:pointer;
+    box-shadow:0 4px 14px rgba(88,166,255,0.4);
+    font-size:24px;display:flex;align-items:center;justify-content:center;
+    transition:transform .25s cubic-bezier(.4,0,.2,1), background .2s}
+  .fab-main:hover{background:#79c0ff}
+  .fab-main.open{transform:rotate(135deg);background:#f85149;
+    box-shadow:0 4px 14px rgba(248,81,73,0.4)}
+  .fab-subs{display:flex;flex-direction:column-reverse;gap:12px;
+    align-items:center;pointer-events:none;opacity:0;
+    transform:translateY(8px);transition:opacity .2s, transform .25s}
+  .fab-container.open .fab-subs{pointer-events:auto;opacity:1;transform:translateY(0)}
+  .fab-sub{width:48px;height:48px;border-radius:50%;border:1px solid var(--border);
+    background:var(--panel);color:var(--text);cursor:pointer;
+    font-size:20px;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 3px 10px rgba(0,0,0,0.3);position:relative;
+    transition:transform .2s, background .2s, opacity .2s;
+    transform:scale(0);opacity:0}
+  .fab-container.open .fab-sub{transform:scale(1);opacity:1}
+  /* 子鈕依序彈出（由下而上 stagger） */
+  .fab-container.open .fab-sub:nth-child(1){transition-delay:.05s}
+  .fab-container.open .fab-sub:nth-child(2){transition-delay:.10s}
+  .fab-container.open .fab-sub:nth-child(3){transition-delay:.15s}
+  .fab-container.open .fab-sub:nth-child(4){transition-delay:.20s}
+  .fab-container.open .fab-sub:nth-child(5){transition-delay:.25s}
+  .fab-sub:hover{background:var(--panel2);transform:scale(1.08)}
+  .fab-sub .tip{position:absolute;right:60px;top:50%;transform:translateY(-50%);
+    background:rgba(22,27,34,0.95);color:var(--text);
+    padding:5px 10px;border-radius:6px;font-size:12px;white-space:nowrap;
+    border:1px solid var(--border);
+    opacity:0;pointer-events:none;transition:opacity .15s}
+  .fab-sub:hover .tip{opacity:1}
+
+  /* ── Modal ──────────────────────────── */
+  .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,0.55);
+    z-index:1100;display:none;align-items:center;justify-content:center;
+    padding:24px;animation:bdFade .2s ease}
+  .modal-backdrop.open{display:flex}
+  @keyframes bdFade{from{opacity:0}to{opacity:1}}
+  .modal{background:var(--panel);border:1px solid var(--border);border-radius:12px;
+    max-width:680px;width:100%;max-height:85vh;overflow:hidden;
+    display:flex;flex-direction:column;
+    animation:mUp .25s cubic-bezier(.4,0,.2,1)}
+  @keyframes mUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
+  .modal-header{display:flex;align-items:center;justify-content:space-between;
+    padding:14px 18px;border-bottom:1px solid var(--border);background:var(--panel2)}
+  .modal-header h3{margin:0;font-size:16px;font-weight:600}
+  .modal-close{background:none;border:none;color:var(--muted);cursor:pointer;
+    font-size:20px;padding:4px 10px;border-radius:6px}
+  .modal-close:hover{background:var(--border);color:var(--text)}
+  .modal-body{padding:18px;overflow-y:auto;flex:1;line-height:1.7}
+  .modal-body .placeholder{text-align:center;padding:40px 20px;color:var(--muted)}
+  .modal-body .placeholder .icon{font-size:48px;margin-bottom:14px}
 </style>
 </head>
 <body>
@@ -241,6 +298,102 @@
   資料每個交易日盤後（17:00 後）由 Bot 自動更新；T+1 撮合在隔日盤後寫入 ·
   <a href="https://github.com/znxuyz/my_stock_bot" target="_blank">原始碼</a>
 </footer>
+
+<!-- ══════════ Floating Action Button ══════════ -->
+<div class="fab-container" id="fab">
+  <button class="fab-main" id="fabMain" aria-label="開啟功能選單">+</button>
+  <div class="fab-subs">
+    <button class="fab-sub" data-modal="help" aria-label="指令說明">
+      📚<span class="tip">指令說明</span>
+    </button>
+    <button class="fab-sub" data-modal="topflow" aria-label="外資買賣超榜">
+      📊<span class="tip">外資買賣超榜</span>
+    </button>
+    <button class="fab-sub" data-modal="stock" aria-label="個股查詢">
+      🔍<span class="tip">個股查詢</span>
+    </button>
+    <button class="fab-sub" data-modal="fortune" aria-label="每日運勢">
+      🔮<span class="tip">每日運勢</span>
+    </button>
+    <button class="fab-sub" data-modal="roast" aria-label="川普評論">
+      🗣️<span class="tip">川普評論</span>
+    </button>
+  </div>
+</div>
+
+<!-- ══════════ Modals ══════════ -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <!-- 指令說明 -->
+  <div class="modal" data-modal-content="help" hidden>
+    <div class="modal-header">
+      <h3>📚 指令說明</h3>
+      <button class="modal-close" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="placeholder">
+        <div class="icon">📚</div>
+        <p><b>尚未實作</b></p>
+        <p>未來會列出所有 Discord 指令的用法與範例。</p>
+      </div>
+    </div>
+  </div>
+  <!-- 外資買賣超榜 -->
+  <div class="modal" data-modal-content="topflow" hidden>
+    <div class="modal-header">
+      <h3>📊 外資買賣超榜</h3>
+      <button class="modal-close" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="placeholder">
+        <div class="icon">📊</div>
+        <p><b>尚未實作</b></p>
+        <p>未來會顯示外資買超 Top 10 與賣超 Top 10。</p>
+      </div>
+    </div>
+  </div>
+  <!-- 個股查詢 -->
+  <div class="modal" data-modal-content="stock" hidden>
+    <div class="modal-header">
+      <h3>🔍 個股查詢</h3>
+      <button class="modal-close" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="placeholder">
+        <div class="icon">🔍</div>
+        <p><b>尚未實作</b></p>
+        <p>未來可輸入股票代號查看完整評分、進場區間與指標。</p>
+      </div>
+    </div>
+  </div>
+  <!-- 每日運勢 -->
+  <div class="modal" data-modal-content="fortune" hidden>
+    <div class="modal-header">
+      <h3>🔮 每日運勢</h3>
+      <button class="modal-close" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="placeholder">
+        <div class="icon">🔮</div>
+        <p><b>尚未實作</b></p>
+        <p>未來會顯示今日股市運勢（純娛樂）。</p>
+      </div>
+    </div>
+  </div>
+  <!-- 川普評論 -->
+  <div class="modal" data-modal-content="roast" hidden>
+    <div class="modal-header">
+      <h3>🗣️ 川普評論</h3>
+      <button class="modal-close" aria-label="關閉">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="placeholder">
+        <div class="icon">🗣️</div>
+        <p><b>尚未實作</b></p>
+        <p>未來會用川普語氣評論今日大盤（純娛樂）。</p>
+      </div>
+    </div>
+  </div>
+</div>
 
 <script>
 const STATE = { today:null, stats:null, history:null };
@@ -546,6 +699,61 @@ function renderHistory(){
 
 loadAll();
 setInterval(loadAll, 5*60*1000);
+
+// ══════════ FAB + Modal ══════════
+(function(){
+  const fab        = document.getElementById('fab');
+  const fabMain    = document.getElementById('fabMain');
+  const backdrop   = document.getElementById('modal-backdrop');
+  const subs       = fab.querySelectorAll('.fab-sub');
+  const modals     = backdrop.querySelectorAll('.modal');
+
+  function closeFab(){
+    fab.classList.remove('open');
+    fabMain.classList.remove('open');
+    fabMain.textContent = '+';
+  }
+  function openFab(){
+    fab.classList.add('open');
+    fabMain.classList.add('open');
+    fabMain.textContent = '+';   // CSS rotate 會視覺上變 ✕
+  }
+  function toggleFab(){
+    if(fab.classList.contains('open')) closeFab(); else openFab();
+  }
+
+  function openModal(name){
+    modals.forEach(m => m.hidden = (m.dataset.modalContent !== name));
+    backdrop.classList.add('open');
+  }
+  function closeModal(){
+    backdrop.classList.remove('open');
+    modals.forEach(m => m.hidden = true);
+  }
+
+  fabMain.addEventListener('click', toggleFab);
+  subs.forEach(btn => btn.addEventListener('click', e => {
+    const name = btn.dataset.modal;
+    closeFab();
+    openModal(name);
+  }));
+
+  // 點 backdrop 空白處關閉；點 modal 內部不關
+  backdrop.addEventListener('click', e => {
+    if(e.target === backdrop) closeModal();
+  });
+  // 關閉鈕
+  backdrop.querySelectorAll('.modal-close').forEach(btn =>
+    btn.addEventListener('click', closeModal));
+
+  // ESC 關閉
+  document.addEventListener('keydown', e => {
+    if(e.key === 'Escape'){
+      if(backdrop.classList.contains('open')) closeModal();
+      else if(fab.classList.contains('open'))  closeFab();
+    }
+  });
+})();
 </script>
 </body>
 </html>
