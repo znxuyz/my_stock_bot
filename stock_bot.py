@@ -386,6 +386,120 @@ def calc_obv(df):
             obv.append(obv[-1])
     return pd.Series(obv, index=df.index)
 
+
+def calc_macd(df, fast=12, slow=26, signal=9):
+    """
+    MACD：DIF = EMA(fast)-EMA(slow); DEA = EMA(DIF, signal); Hist = DIF-DEA
+    回傳最新的 dif/dea/hist + 評分（0~10 分）+ 標籤。
+    需要至少 slow+signal 筆資料才有意義（35 筆）。
+
+    評分邏輯：
+      ─ 黃金交叉發生在最近 3 天 + DIF > 0   → 10 分（最強多頭）
+      ─ 黃金交叉發生在最近 3 天 + DIF ≤ 0   → 7 分（反彈起點）
+      ─ DIF > DEA 且 Histogram 擴張        → 8 分（多頭動能增強）
+      ─ DIF > DEA 但 Histogram 萎縮        → 5 分（動能轉弱）
+      ─ DIF < DEA                         → 0 分（空頭排列）
+    """
+    if len(df) < slow + signal:
+        return {'macd_score': 5, 'macd_label': '⚪ MACD 資料不足',
+                'dif': None, 'dea': None, 'hist': None,
+                'expanding': None, 'cross_up': False}
+    closes   = df['close'].astype(float)
+    ema_fast = closes.ewm(span=fast, adjust=False).mean()
+    ema_slow = closes.ewm(span=slow, adjust=False).mean()
+    dif = ema_fast - ema_slow
+    dea = dif.ewm(span=signal, adjust=False).mean()
+    hist = dif - dea
+
+    last_dif  = float(dif.iloc[-1])
+    last_dea  = float(dea.iloc[-1])
+    last_hist = float(hist.iloc[-1])
+    prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
+
+    # 最近 3 天有沒有發生黃金交叉
+    cross_up = False
+    for i in range(max(1, len(dif)-3), len(dif)):
+        if dif.iloc[i-1] <= dea.iloc[i-1] and dif.iloc[i] > dea.iloc[i]:
+            cross_up = True
+            break
+
+    expanding = last_hist > prev_hist  # Histogram 是否還在擴張
+
+    if cross_up and last_dif > 0:
+        score, label = 10, '🚀 MACD 黃金交叉（零軸上）'
+    elif cross_up and last_dif <= 0:
+        score, label = 7, '↗️ MACD 黃金交叉（反彈起點）'
+    elif last_dif > last_dea and expanding:
+        score, label = 8, '✅ MACD 多頭動能增強'
+    elif last_dif > last_dea and not expanding:
+        score, label = 5, '⚠️ MACD 多頭動能轉弱'
+    else:
+        score, label = 0, '❌ MACD 空頭排列'
+
+    return {
+        'macd_score': score, 'macd_label': label,
+        'dif': round(last_dif, 4), 'dea': round(last_dea, 4),
+        'hist': round(last_hist, 4),
+        'expanding': expanding, 'cross_up': cross_up,
+    }
+
+
+def count_consecutive_limit_ups(df, threshold=9.5):
+    """
+    從最後一筆往回計算連續漲停天數（含當日）。
+    台股漲停 +10%，實務上 +9.5% 以上視為漲停（含計算誤差）。
+    """
+    if len(df) < 2:
+        return 0
+    closes = df['close'].astype(float).values
+    cnt = 0
+    for i in range(len(closes) - 1, 0, -1):
+        prev = closes[i-1]
+        if prev == 0:
+            break
+        chg = (closes[i] - prev) / prev * 100
+        if chg >= threshold:
+            cnt += 1
+        else:
+            break
+    return cnt
+
+
+def check_strong_chase(entry, macd_info, market_score):
+    """
+    對 連續漲停 ≥3 日 的股票檢查 5 項追漲門檻：
+      1. 法人今日合計買超 ≥ 200K 股
+      2. 量比 ≥ 2.0x
+      3. 籌碼集中度 ≥ 10%
+      4. MACD: DIF > DEA 且 Histogram 擴張中
+      5. 大盤環境分數 ≥ 0
+    回傳 dict: {'passed': int, 'reasons': [str]}
+    """
+    foreign = entry.get('foreign', 0)
+    trust   = entry.get('trust', 0)
+    total_inst = foreign + trust
+
+    chip_score = entry.get('chip_score', 0)  # 0/2/5/8 對應集中度 <5/5-10/10-20/≥20
+    vr = entry.get('vol_ratio', 0)
+
+    macd_dif = macd_info.get('dif')
+    macd_dea = macd_info.get('dea')
+    macd_exp = macd_info.get('expanding', False)
+    macd_ok  = (macd_dif is not None and macd_dea is not None
+                and macd_dif > macd_dea and macd_exp)
+
+    checks = [
+        ('法人合計買超 ≥ 200K 股', total_inst >= 200000),
+        ('量比 ≥ 2.0x',           vr >= 2.0),
+        ('籌碼集中度 ≥ 10%',       chip_score >= 5),  # chip_score>=5 對應 conc>=10%
+        ('MACD 多頭擴張',         macd_ok),
+        ('大盤環境分數 ≥ 0',       market_score >= 0),
+    ]
+    passed = sum(1 for _, ok in checks if ok)
+    reasons = [('✅ ' if ok else '❌ ') + name for name, ok in checks]
+    return {'passed': passed, 'checks': checks, 'reasons': reasons}
+
+
 def calc_advanced_indicators(df, price):
     """RSI、ATR停損、壓力位、位階、OBV背離"""
     result = {
@@ -626,23 +740,18 @@ def calc_chip_concentration(foreign, trust, volume):
 
 def calc_score(entry):
     """
-    綜合積分（v2 重新分配權重）
+    綜合積分（v3 → v4：加入 MACD 10 分，漲幅從 15 降為 10，總分維持 100）
     SS >= 85, S >= 68, A >= 52, 其餘淘汰
-
-    v2 改動：
-    - 漲幅 25 → 15（已暴漲的隔日跳空也買不便宜，降低權重）
-    - 乖離率 15 → 20（≤3% 滿分，>8% 直接 0 分）
-    - 壓力位 5 → 10（接近壓力的目標難達）
     """
     score = 0
 
-    # 漲幅（15分）── 2~5% 區間最高分；過度上漲反而扣分
+    # 漲幅（10分）── 2~5% 區間最高分；過度上漲反而扣分
     chg = entry.get('change', 0)
-    if   3 <= chg <= 5:   score += 15
-    elif 2 <= chg < 3:    score += 12
-    elif 5 < chg <= 7:    score += 10
-    elif 1 <= chg < 2:    score += 8
-    elif chg > 7:         score += 5   # 漲停板 / 接近漲停，難進場
+    if   3 <= chg <= 5:   score += 10
+    elif 2 <= chg < 3:    score += 8
+    elif 5 < chg <= 7:    score += 7
+    elif 1 <= chg < 2:    score += 5
+    elif chg > 7:         score += 3   # 漲停板 / 接近漲停，難進場
 
     # 量比（20分）
     vr = entry.get('vol_ratio', 0)
@@ -690,6 +799,9 @@ def calc_score(entry):
     if ps >= 0.5:          score += 5
     elif ps == 0:          score += 3
     elif ps == -0.5:       score += 1
+
+    # MACD（10分）── calc_macd 已直接給 0/5/7/8/10 分
+    score += entry.get('macd_score', 5)
 
     # ── 新增四項加減分 ──
 
@@ -868,10 +980,13 @@ def fill_pending_t1_entries(today):
         if kbar is None:
             print(f'[T+1撮合] {sid} {sd} 抓不到 T+1 K 棒，先跳過')
             continue
+        # 強勢追漲不接刀：跳空跌破收盤就算 missed
+        allow_gap_down = (r.get('chase_mode') != 'strong_chase')
         status, fill_price = _db.determine_t1_fill(
             kbar['open'], kbar['high'], kbar['low'],
             float(r['entry_zone_low']) if r['entry_zone_low'] is not None else None,
             float(r['entry_zone_high']) if r['entry_zone_high'] is not None else None,
+            allow_gap_down=allow_gap_down,
         )
         try:
             _db.fill_t1_entry(r['id'], kbar['date'], status, fill_price)
@@ -1211,6 +1326,8 @@ def run_analysis():
         print(f"[EMA] 月份清單：{months}")
 
         ss_list, s_list, a_list = [], [], []
+        chase_list = []   # 強勢追漲（連續≥3日漲停且通過5項門檻）
+        watch_list = []   # 觀察名單（連續≥3日漲停且通過4項門檻）
 
         for idx_c, entry in enumerate(candidates):
             sid = entry['sid']
@@ -1268,22 +1385,50 @@ def run_analysis():
                     entry['margin_label'] = ''
                     print(f"[融資] {sid} 失敗：{_me2}")
 
-                change = entry['change']
+                # MACD（10 分；calc_macd 會回傳 macd_score/dif/dea/hist/expanding/cross_up）
+                _macd_info = calc_macd(df_hist)
+                entry['macd_score']     = _macd_info['macd_score']
+                entry['macd_label']     = _macd_info['macd_label']
+                entry['macd_info']      = _macd_info
 
-                # 積分制分級
-                score = calc_score(entry)
+                # 連續漲停判定 + 5項追漲門檻檢查
+                consec = count_consecutive_limit_ups(df_hist)
+                entry['consec_limit_up'] = consec
+                if consec >= 3:
+                    chase = check_strong_chase(entry, _macd_info, entry.get('market_score', 0))
+                    entry['chase_check'] = chase
+                    if chase['passed'] >= 5:
+                        entry['chase_mode'] = 'strong_chase'
+                    elif chase['passed'] >= 4:
+                        entry['chase_mode'] = 'watch'
+                    else:
+                        # 連續漲停但條件不夠，跳過（不浪費 SS/S/A 名額）
+                        print(f"  [{idx_c+1}/{len(candidates)}] {sid} 連續{consec}日漲停但只過{chase['passed']}/5 項 ✗")
+                        continue
+                else:
+                    entry['chase_mode'] = 'normal'
+
+                change = entry['change']
+                score  = calc_score(entry)
                 entry['score'] = score
-                if   score >= 85: ss_list.append(entry)
+
+                # 分級：strong_chase 與 watch 走專屬清單，其他依評分
+                if entry['chase_mode'] == 'strong_chase':
+                    chase_list.append(entry)
+                elif entry['chase_mode'] == 'watch':
+                    watch_list.append(entry)
+                elif score >= 85: ss_list.append(entry)
                 elif score >= 68:  s_list.append(entry)
                 elif score >= 52:  a_list.append(entry)
-                # <50 淘汰，不加入任何列表
+                # <52 淘汰
 
-                print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ 漲{change}% 量比{vol_ratio:.2f} EMA:{ema_mode} {elapsed:.1f}s")
+                print(f"  [{idx_c+1}/{len(candidates)}] {sid} {entry['name']} ✓ "
+                      f"漲{change}% 量比{vol_ratio:.2f} EMA:{ema_mode} mode:{entry['chase_mode']} {elapsed:.1f}s")
 
             except Exception as e:
                 print(f"  [{idx_c+1}/{len(candidates)}] {sid} 錯誤：{e}")
 
-        for lst in [ss_list, s_list, a_list]:
+        for lst in [ss_list, s_list, a_list, chase_list, watch_list]:
             lst.sort(key=lambda e: e.get('score', 0), reverse=True)
 
         # 寫入資料庫（對所有已設定伺服器各存一份）
@@ -1293,9 +1438,11 @@ def run_analysis():
                 _sd = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
                 _all = []
                 for _e, _g in (
-                    [(e, 'SS') for e in ss_list] +
-                    [(e, 'S')  for e in s_list]  +
-                    [(e, 'A')  for e in a_list]
+                    [(e, 'SS')    for e in ss_list]    +
+                    [(e, 'S')     for e in s_list]     +
+                    [(e, 'A')     for e in a_list]     +
+                    [(e, 'CHASE') for e in chase_list] +
+                    [(e, 'WATCH') for e in watch_list]
                 ):
                     _e2 = dict(_e); _e2['grade'] = _g
                     _all.append(_e2)
@@ -1360,22 +1507,35 @@ def run_analysis():
             if b:
                 sp = '+' if b['bias_pct'] >= 0 else ''
                 lines.append(f"乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
-            # 建議進場區間：[close × 0.97, close × 1.00]
-            # 隔日 T+1 必須觸及此區間才算進場（沒觸到 → 未進場，不計入賺錢勝率）
-            # 實際成交後 target/stop 由 actual_entry × (1.05/1.10/0.95) 算
-            zone_low  = round(e['price'] * 0.97, 1)
-            zone_high = round(e['price'] * 1.00, 1)
-            lines += ['', '🎯建議進場區（限價單）',
-                      f"進場區間：{zone_low:,.1f} ~ {zone_high:,.1f} 元",
-                      f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%"]
+            # 進場區間（根據 chase_mode）
+            mode = e.get('chase_mode', 'normal')
+            if mode == 'strong_chase':
+                zl = round(e['price'] * 1.00, 1)
+                zh = round(e['price'] * 1.07, 1)
+                lines += ['', f"🚀強勢追漲（連續{e.get('consec_limit_up', 0)}日漲停）",
+                          f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍隔日跳空 0~7%）",
+                          f"➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 則放棄；跳空跌破收盤視為趨勢反轉，不接刀"]
+            elif mode == 'watch':
+                lines += ['', f"⚠️觀察名單（連續{e.get('consec_limit_up', 0)}日漲停但條件不足）",
+                          f"➡️ 5 項追漲門檻僅通過 {e.get('chase_check', {}).get('passed', 0)}/5，**不買入**只觀察"]
+                if e.get('chase_check', {}).get('reasons'):
+                    lines += [f"  {r}" for r in e['chase_check']['reasons']]
+            else:
+                zl = round(e['price'] * 0.97, 1)
+                zh = round(e['price'] * 1.00, 1)
+                lines += ['', '🎯建議進場區（限價單）',
+                          f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元",
+                          f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%"]
             if adv.get('atr_stop'):
                 lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
             has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
                            adv.get('position_label'), adv.get('obv_label'),
                            (e.get('chip_label') and e.get('chip_score', 0) > 0),
-                           e.get('margin_label')])
+                           e.get('margin_label'), e.get('macd_label')])
             if has_adv:
                 lines += ['', '📊輔助數據']
+                if e.get('macd_label'):
+                    lines.append(f"MACD：{e['macd_label']}")
                 if adv.get('rsi_label'):
                     lines.append(f"RSI：{adv['rsi_label']}")
                 if adv.get('resistance_label'):
@@ -1412,6 +1572,10 @@ def run_analysis():
             sections += [stock_block(e, '💎', 'S',  '💎') for e in  s_list[:10]]
         if a_list:
             sections += [stock_block(e, '📈', 'A',  '📈') for e in  a_list[:10]]
+        if chase_list:
+            sections += [stock_block(e, '🚀', 'CHASE', '🚀') for e in chase_list[:5]]
+        if watch_list:
+            sections += [stock_block(e, '⚠️', 'WATCH', '⚠️') for e in watch_list[:5]]
         if not sections:
             sections.append('（今日無符合條件之標的）')
 

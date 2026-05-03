@@ -51,9 +51,14 @@
   .grade-S {background:#58a6ff33;color:#79c0ff;border:1px solid #58a6ff66}
   .grade-A {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
   .grade-X {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
+  .grade-CHASE{background:#f8514933;color:#ffa198;border:1px solid #f8514966}
+  .grade-WATCH{background:#d2992233;color:#f0c674;border:1px solid #d2992266}
   .fill-filled  {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
   .fill-missed  {background:#f8514933;color:#ffa198;border:1px solid #f8514966}
   .fill-pending {background:#8b949e33;color:#c9d1d9;border:1px solid #8b949e66}
+  .fill-watch   {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
+  .mode-strong  {background:#f8514933;color:#ffa198;border:1px solid #f8514966}
+  .mode-watch   {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
   .status-win{color:var(--green);font-weight:600}
   .status-loss{color:var(--red);font-weight:600}
   .status-pending{color:var(--muted)}
@@ -98,14 +103,16 @@
         <select id="today-grade" onchange="renderToday()">
           <option value="">全部等級</option>
           <option>SS</option><option>S</option><option>A</option>
+          <option value="CHASE">🚀 強勢追漲</option><option value="WATCH">⚠️ 觀察</option>
         </select>
       </div>
       <div class="scroll"><table>
         <thead><tr>
           <th>等級</th><th class="num">分數</th>
           <th>代號</th><th>名稱</th>
+          <th>模式</th>
           <th class="num">收盤</th><th class="num">漲幅</th><th class="num">量比</th>
-          <th class="num">乖離</th><th>進場區評語</th>
+          <th class="num">乖離</th>
           <th class="num">建議進場區</th>
           <th>T+1 撮合</th>
           <th class="num">實際進場</th>
@@ -262,7 +269,13 @@ function gradePill(g){ return `<span class="pill grade-${g}">${g||'-'}</span>`; 
 function fillPill(s){
   if(s==='filled') return '<span class="pill fill-filled">✅進場</span>';
   if(s==='missed') return '<span class="pill fill-missed">❌未進場</span>';
+  if(s==='watch')  return '<span class="pill fill-watch">⚠️觀察</span>';
   return '<span class="pill fill-pending">⏳待撮合</span>';
+}
+function modePill(m, consec){
+  if(m==='strong_chase') return `<span class="pill mode-strong">🚀 追漲 (${consec||0})</span>`;
+  if(m==='watch')        return `<span class="pill mode-watch">⚠️ 觀察 (${consec||0})</span>`;
+  return '';
 }
 function zone(lo, hi){
   if(lo===null||hi===null) return '-';
@@ -342,11 +355,11 @@ function renderToday(){
       <td class="num">${r.score!=null?r.score:'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>
+      <td>${modePill(r.chase_mode, r.consec_limit_up) || '<span class="neu">一般</span>'}</td>
       <td class="num">${fmt(r.close_price)}</td>
       <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
       <td class="num">${fmt(r.vol_ratio,1)}x</td>
       <td class="num ${clsPct(r.bias_pct)}">${fmtPct(r.bias_pct)}</td>
-      <td>${r.bias_label||'-'}</td>
       <td class="num">${zone(r.entry_zone_low, r.entry_zone_high)}</td>
       <td>${fillPill(r.fill_status)}</td>
       <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
@@ -512,9 +525,10 @@ function renderHistory(){
   if(!filtered.length){ tbody.innerHTML='<tr><td colspan="13" class="empty">無符合條件的紀錄</td></tr>'; return; }
   tbody.innerHTML = filtered.slice(0, 500).map(r=>{
     const st = statusOf(r);
+    const modeBadge = modePill(r.chase_mode, r.consec_limit_up);
     return `<tr>
       <td>${r.screen_date||''}</td>
-      <td>${gradePill(r.grade)}</td>
+      <td>${gradePill(r.grade)} ${modeBadge}</td>
       <td class="num">${r.score!=null?r.score:'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>

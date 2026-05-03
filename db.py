@@ -27,7 +27,7 @@ def get_conn():
 
 
 # 手動觸發舊資料清空：將此值改為 v3、v4… 即可重建 screen_records
-SCHEMA_VERSION = 'v3-entry-zone'
+SCHEMA_VERSION = 'v4-macd-chase'
 
 
 def _ensure_schema_version_table(cur):
@@ -124,9 +124,12 @@ def init_db():
         bias_pct           NUMERIC(8,2),
         bias_label         VARCHAR(20),
         position_pct       NUMERIC(5,1),
-        -- 建議進場區間（T 日寫入）
-        entry_zone_low     NUMERIC(12,2),       -- close × 0.97
-        entry_zone_high    NUMERIC(12,2),       -- close × 1.00
+        -- 追漲模式：normal=回檔買 / strong_chase=連續漲停且通過5項追漲門檻 / watch=4項過僅觀察
+        chase_mode         VARCHAR(15) DEFAULT 'normal',
+        consec_limit_up    INT DEFAULT 0,        -- 連續漲停天數
+        -- 建議進場區間（T 日寫入；normal vs strong_chase 區間不同）
+        entry_zone_low     NUMERIC(12,2),
+        entry_zone_high    NUMERIC(12,2),
         -- 實際進場：T+1 撮合後回填
         actual_entry_date  DATE,                -- T+1 日期（檢查後寫入，無論成交與否）
         actual_entry_price NUMERIC(12,2),       -- 實際成交價（NULL=未進場）
@@ -236,17 +239,33 @@ def calc_position_pct(grade, bias_pct):
 def save_screen_records(records, screen_date, guild_id):
     """
     寫入篩選結果。actual_entry_* 留 NULL，由 fill_t1_entry 在 T+1 後回填。
-    建議進場區間 = [close × 0.97, close × 1.00]
+    chase_mode 決定 entry_zone 與 fill_status 初始值：
+      normal:       zone = [close × 0.97, close × 1.00]，fill_status='pending'
+      strong_chase: zone = [close × 1.00, close × 1.07]，fill_status='pending'
+      watch:        zone = NULL（不會撮合）           ，fill_status='watch'
     """
     settle1 = next_friday(screen_date, 1)
     settle2 = next_friday(screen_date, 2)
     rows = []
     for e in records:
-        b   = e.get('bias') or {}
-        pos = calc_position_pct(e.get('grade',''), b.get('bias_pct'))
+        b     = e.get('bias') or {}
+        pos   = calc_position_pct(e.get('grade',''), b.get('bias_pct'))
         close = float(e.get('price', 0))
-        zone_low  = round(close * 0.97, 2)
-        zone_high = round(close * 1.00, 2)
+        mode  = e.get('chase_mode', 'normal')
+        consec = int(e.get('consec_limit_up', 0))
+
+        if mode == 'strong_chase':
+            zone_low  = round(close * 1.00, 2)
+            zone_high = round(close * 1.07, 2)
+            init_fill = 'pending'
+        elif mode == 'watch':
+            zone_low, zone_high = None, None
+            init_fill = 'watch'
+        else:  # normal
+            zone_low  = round(close * 0.97, 2)
+            zone_high = round(close * 1.00, 2)
+            init_fill = 'pending'
+
         rows.append((
             guild_id, screen_date,
             e['sid'], e.get('name',''), e.get('grade',''),
@@ -254,17 +273,18 @@ def save_screen_records(records, screen_date, guild_id):
             close, e.get('change', 0), e.get('vol_ratio', 0),
             e.get('foreign', 0), e.get('trust', 0),
             b.get('bias_pct'), b.get('bias_label', ''),
-            pos, zone_low, zone_high,
+            pos, mode, consec,
+            zone_low, zone_high, init_fill,
             settle1, settle2,
         ))
     sql = """
     INSERT INTO screen_records
       (guild_id, screen_date, sid, name, grade, score, close_price,
        change_pct, vol_ratio, foreign_shares, trust_shares,
-       bias_pct, bias_label, position_pct,
-       entry_zone_low, entry_zone_high,
+       bias_pct, bias_label, position_pct, chase_mode, consec_limit_up,
+       entry_zone_low, entry_zone_high, fill_status,
        settle1_date, settle2_date)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -277,10 +297,11 @@ def get_records_needing_t1_check(before_date):
     """
     撈取 fill_status='pending' 且 screen_date < before_date 的紀錄
     （由呼叫端在 T+1 抓 K 棒判定是否成交）
+    'watch' 模式不會被撈出，因為它本來就不撮合。
     """
     sql = """
     SELECT id, guild_id, screen_date, sid, name, close_price,
-           entry_zone_low, entry_zone_high
+           entry_zone_low, entry_zone_high, chase_mode
     FROM screen_records
     WHERE fill_status = 'pending' AND screen_date < %s
     ORDER BY screen_date, sid
@@ -291,20 +312,23 @@ def get_records_needing_t1_check(before_date):
             return cur.fetchall()
 
 
-def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high):
+def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high,
+                      allow_gap_down=True):
     """
     根據 T+1 K 棒 + 進場區間決定撮合結果。
-    回傳 (status, fill_price)：
-      ('filled', price) - 成交
-      ('missed', None)  - 未進場
-    撮合規則（限價單模擬）：
+    回傳 (status, fill_price)：('filled', price) 或 ('missed', None)
+
+    一般撮合規則（限價單模擬）：
       A. 開盤在區間內       → 以開盤成交（最佳）
       B. 開盤跳空高於區間   → 若盤中 low ≤ zone_high，以 zone_high 成交；否則 missed
       C. 開盤跳空低於區間   → 以開盤成交（撿便宜）
+
+    allow_gap_down=False（強勢追漲模式專用）：
+      C 改為直接 missed —— 強勢飆股若隔日跳空跌破代表趨勢反轉，不接刀。
     """
     if zone_low is None or zone_high is None or t1_open is None:
         return 'missed', None
-    o = float(t1_open)
+    o  = float(t1_open)
     lo = float(t1_low) if t1_low is not None else o
     zl = float(zone_low)
     zh = float(zone_high)
@@ -314,8 +338,10 @@ def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high):
         if lo <= zh:
             return 'filled', round(zh, 2)
         return 'missed', None
-    # o < zl：跳空跌破區間下限，視為以開盤成交（更便宜）
-    return 'filled', round(o, 2)
+    # o < zl
+    if allow_gap_down:
+        return 'filled', round(o, 2)
+    return 'missed', None
 
 
 def fill_t1_entry(record_id, t1_date, status, entry_price):
@@ -497,7 +523,7 @@ def get_screens_by_date(screen_date):
     SELECT DISTINCT ON (sid)
         screen_date, sid, name, grade, score, close_price, change_pct,
         vol_ratio, foreign_shares, trust_shares, bias_pct, bias_label,
-        position_pct,
+        position_pct, chase_mode, consec_limit_up,
         entry_zone_low, entry_zone_high, fill_status,
         actual_entry_date, actual_entry_price,
         actual_target1, actual_target2, actual_stop_loss,
@@ -519,6 +545,7 @@ def get_history_records(limit_days=90):
     SELECT DISTINCT ON (screen_date, sid)
         screen_date, sid, name, grade, score, close_price, change_pct,
         vol_ratio, bias_pct,
+        chase_mode, consec_limit_up,
         entry_zone_low, entry_zone_high, fill_status,
         actual_entry_date, actual_entry_price,
         actual_target1, actual_target2, actual_stop_loss,
