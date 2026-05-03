@@ -28,6 +28,7 @@ except Exception as _e:
 
 DOCS_DIR  = os.path.join(os.path.dirname(__file__), 'docs')
 DATA_DIR  = os.path.join(DOCS_DIR, 'data')
+TOP_FLOW_CACHE = '/tmp/stockbot_topflow_cache.json'
 
 GITHUB_API     = 'https://api.github.com'
 GITHUB_TOKEN   = os.environ.get('GITHUB_TOKEN', '')
@@ -84,7 +85,7 @@ def build_payloads():
     summary_clean = _row_to_dict(summary) if summary else {}
 
     updated_at = _tw_now_iso()
-    return {
+    payloads = {
         'today.json': {
             'updated_at':  updated_at,
             'screen_date': latest_date.isoformat() if latest_date else None,
@@ -104,6 +105,16 @@ def build_payloads():
             'records':    history_rows,
         },
     }
+
+    # 外資買賣超榜（從 /tmp 快取讀；run_analysis 會在跑分析時寫入）
+    if os.path.exists(TOP_FLOW_CACHE):
+        try:
+            with open(TOP_FLOW_CACHE, encoding='utf-8') as f:
+                payloads['topflow.json'] = json.load(f)
+        except Exception as e:
+            print(f'[Web] 讀取 topflow 快取失敗：{e}')
+
+    return payloads
 
 
 def write_local(payloads):
@@ -209,9 +220,29 @@ def push_payloads(payloads):
     return ok_count == len(payloads)
 
 
-def export_dashboard():
-    """主入口：盤後篩選完成後呼叫一次"""
+def cache_top_flow(top_flow, screen_date_str=None):
+    """把外資買賣超 Top 10 寫進 /tmp 快取，下次 build_payloads 會讀進 topflow.json"""
+    if not top_flow:
+        return
     try:
+        data = {
+            'updated_at':  _tw_now_iso(),
+            'screen_date': screen_date_str,
+            'buyers':      top_flow.get('buyers', []),
+            'sellers':     top_flow.get('sellers', []),
+        }
+        with open(TOP_FLOW_CACHE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, default=_json_default)
+        print(f'[Web] 外資榜快取已寫入：{TOP_FLOW_CACHE}')
+    except Exception as e:
+        print(f'[Web] 寫外資榜快取失敗：{e}')
+
+
+def export_dashboard(top_flow=None, screen_date_str=None):
+    """主入口：盤後篩選完成後呼叫一次。若提供 top_flow 會一併輸出 topflow.json"""
+    try:
+        if top_flow is not None:
+            cache_top_flow(top_flow, screen_date_str)
         _diag()
         payloads = build_payloads()
         write_local(payloads)

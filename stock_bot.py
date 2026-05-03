@@ -444,6 +444,57 @@ def calc_macd(df, fast=12, slow=26, signal=9):
     }
 
 
+def extract_top_flow(df_merged, n=10):
+    """
+    從合併後的 T86 + MI_INDEX DataFrame 取出外資買超 / 賣超 Top N
+    回傳 {'buyers': [...], 'sellers': [...]}
+    每筆含 sid / name / foreign / trust / close / change_pct
+    """
+    if df_merged is None or df_merged.empty:
+        return {'buyers': [], 'sellers': []}
+
+    df = df_merged.copy()
+    name_col  = next((c for c in df.columns if '證券名稱' in str(c)), df.columns[1])
+    close_col = next((c for c in df.columns if '收盤' in str(c)), None)
+    diff_col  = next((c for c in df.columns if '漲跌價差' in str(c) or
+                                              ('漲跌' in str(c) and '差' in str(c))), None)
+    sign_col  = next((c for c in df.columns if '漲跌(+/-)' in str(c) or '漲跌符號' in str(c)), None)
+
+    if close_col:
+        df['_close'] = pd.to_numeric(
+            df[close_col].astype(str).str.replace(',', ''), errors='coerce')
+    if diff_col:
+        df['_diff'] = pd.to_numeric(
+            df[diff_col].astype(str).str.replace(',', ''), errors='coerce')
+        if sign_col:
+            df['_diff'] = df.apply(
+                lambda r: -abs(r['_diff']) if (
+                    '−' in str(r[sign_col]) or str(r[sign_col]).strip() == '-'
+                ) else abs(r['_diff']),
+                axis=1
+            )
+
+    def _to_records(rows):
+        out = []
+        for _, row in rows.iterrows():
+            close = float(row['_close']) if close_col and not pd.isna(row.get('_close')) else None
+            diff  = float(row['_diff'])  if diff_col  and not pd.isna(row.get('_diff'))  else None
+            chg   = round(diff / (close - diff) * 100, 2) if (close and diff is not None and (close - diff) != 0) else None
+            out.append({
+                'sid':        str(row['sid_clean']),
+                'name':       str(row[name_col]).strip(),
+                'foreign':    int(row['_foreign']) if not pd.isna(row.get('_foreign')) else 0,
+                'trust':      int(row['_trust'])   if not pd.isna(row.get('_trust'))   else 0,
+                'close':      close,
+                'change_pct': chg,
+            })
+        return out
+
+    buyers  = _to_records(df[df['_foreign'] > 0].sort_values('_foreign', ascending=False).head(n))
+    sellers = _to_records(df[df['_foreign'] < 0].sort_values('_foreign', ascending=True).head(n))
+    return {'buyers': buyers, 'sellers': sellers}
+
+
 def count_consecutive_limit_ups(df, threshold=9.5):
     """
     從最後一筆往回計算連續漲停天數（含當日）。
@@ -1249,6 +1300,14 @@ def run_analysis():
         df = pd.merge(df_i, df_p, on='sid_clean', how='inner')
         print(f"[合併] {len(df)} 檔")
 
+        # 抽出外資買賣超 Top 10（給 dashboard 用）
+        try:
+            top_flow_data = extract_top_flow(df, n=10)
+            print(f"[外資榜] 買超 {len(top_flow_data['buyers'])} / 賣超 {len(top_flow_data['sellers'])}")
+        except Exception as _tfe:
+            top_flow_data = None
+            print(f"[外資榜] 失敗：{_tfe}")
+
         col_close = next((c for c in df.columns if '收盤' in str(c)), None)
         col_diff  = next((c for c in df.columns if '漲跌價差' in str(c) or
                          ('漲跌' in str(c) and '差' in str(c))), None)
@@ -1477,7 +1536,7 @@ def run_analysis():
             # 匯出至 Web Dashboard（GitHub Pages）
             try:
                 import web_export as _we
-                _we.export_dashboard()
+                _we.export_dashboard(top_flow=top_flow_data, screen_date_str=date_str)
             except Exception as _we_e:
                 print(f"[Web] Dashboard 匯出失敗：{_we_e}")
 

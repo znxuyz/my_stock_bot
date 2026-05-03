@@ -341,15 +341,11 @@
   <!-- 外資買賣超榜 -->
   <div class="modal" data-modal-content="topflow" hidden>
     <div class="modal-header">
-      <h3>📊 外資買賣超榜</h3>
+      <h3>📊 外資買賣超榜 <small id="topflow-date" class="updated"></small></h3>
       <button class="modal-close" aria-label="關閉">✕</button>
     </div>
-    <div class="modal-body">
-      <div class="placeholder">
-        <div class="icon">📊</div>
-        <p><b>尚未實作</b></p>
-        <p>未來會顯示外資買超 Top 10 與賣超 Top 10。</p>
-      </div>
+    <div class="modal-body" id="topflow-body">
+      <div class="placeholder"><div class="icon">⏳</div><p>載入中…</p></div>
     </div>
   </div>
   <!-- 個股查詢 -->
@@ -397,7 +393,7 @@
 </div>
 
 <script>
-const STATE = { today:null, stats:null, history:null };
+const STATE = { today:null, stats:null, history:null, topflow:null };
 
 function fmt(n, digits=2){
   if(n===null || n===undefined || n==='') return '-';
@@ -452,15 +448,16 @@ function statusOf(rec){
 async function loadAll(){
   const setText = (sel,t)=>{ const e=document.querySelector(sel); if(e) e.textContent=t; };
   try{
-    const [t,s,h] = await Promise.all([
+    const [t,s,h,tf] = await Promise.all([
       fetch('./data/today.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
       fetch('./data/stats.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
       fetch('./data/history.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
+      fetch('./data/topflow.json?ts='+Date.now()).then(r=>r.ok?r.json():null).catch(()=>null),
     ]);
-    STATE.today = t; STATE.stats = s; STATE.history = h;
+    STATE.today = t; STATE.stats = s; STATE.history = h; STATE.topflow = tf;
     const u = (t && t.updated_at) || (s && s.updated_at) || (h && h.updated_at) || '尚未產生';
     setText('#updated','更新時間：'+u);
-    renderToday(); renderStatus(); renderStats(); renderHistory();
+    renderToday(); renderStatus(); renderStats(); renderHistory(); renderTopFlow();
   }catch(e){
     setText('#updated','載入失敗：'+e.message);
   }
@@ -655,6 +652,57 @@ function renderStats(){
       <td class="num ${clsPct(r.avg_ret)}">${fmtPct(r.avg_ret)}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="5" class="empty">尚無資料</td></tr>';
+}
+
+function renderTopFlow(){
+  const body = document.getElementById('topflow-body');
+  const dateEl = document.getElementById('topflow-date');
+  const tf = STATE.topflow;
+  if(!tf || ((!tf.buyers || !tf.buyers.length) && (!tf.sellers || !tf.sellers.length))){
+    body.innerHTML = '<div class="placeholder"><div class="icon">📊</div>'
+      + '<p><b>尚無資料</b></p>'
+      + '<p>等盤後 17:00 後 Bot 跑完當日分析才會產生。</p></div>';
+    if(dateEl) dateEl.textContent = '';
+    return;
+  }
+  if(dateEl){
+    dateEl.textContent = tf.screen_date ? '（'+tf.screen_date+'）' : '';
+  }
+  const fmtShares = n => {
+    if(n===null||n===undefined) return '-';
+    const v = Number(n);
+    if(isNaN(v)) return '-';
+    const sign = v>=0 ? '+' : '';
+    if(Math.abs(v)>=1e6) return `${sign}${(v/1e6).toFixed(2)}M`;
+    if(Math.abs(v)>=1e3) return `${sign}${(v/1e3).toFixed(0)}K`;
+    return `${sign}${v.toLocaleString('en-US')}`;
+  };
+  const trRow = (r, idx) => `
+    <tr>
+      <td class="num">${idx+1}</td>
+      <td><b>${r.sid}</b></td>
+      <td>${r.name||''}</td>
+      <td class="num">${r.close!=null?fmt(r.close):'-'}</td>
+      <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
+      <td class="num ${r.foreign>0?'pos':'neg'}">${fmtShares(r.foreign)}</td>
+      <td class="num ${r.trust>0?'pos':r.trust<0?'neg':'neu'}">${fmtShares(r.trust)}</td>
+    </tr>`;
+  const headRow = `<thead><tr>
+    <th class="num">#</th><th>代號</th><th>名稱</th>
+    <th class="num">收盤</th><th class="num">漲幅</th>
+    <th class="num">外資(股)</th><th class="num">投信(股)</th>
+  </tr></thead>`;
+  const buyers  = (tf.buyers  || []).map((r,i) => trRow(r,i)).join('');
+  const sellers = (tf.sellers || []).map((r,i) => trRow(r,i)).join('');
+  body.innerHTML = `
+    <h4 style="margin:0 0 8px 0;color:var(--green)">🟢 外資買超 Top 10</h4>
+    <div class="scroll" style="max-height:35vh;margin-bottom:18px">
+      <table>${headRow}<tbody>${buyers || '<tr><td colspan="7" class="empty">無資料</td></tr>'}</tbody></table>
+    </div>
+    <h4 style="margin:0 0 8px 0;color:var(--red)">🔴 外資賣超 Top 10</h4>
+    <div class="scroll" style="max-height:35vh">
+      <table>${headRow}<tbody>${sellers || '<tr><td colspan="7" class="empty">無資料</td></tr>'}</tbody></table>
+    </div>`;
 }
 
 function renderHistory(){
