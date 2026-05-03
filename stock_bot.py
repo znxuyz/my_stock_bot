@@ -626,18 +626,23 @@ def calc_chip_concentration(foreign, trust, volume):
 
 def calc_score(entry):
     """
-    綜合積分（基礎100分 + 四項加減分）
+    綜合積分（v2 重新分配權重）
     SS >= 85, S >= 68, A >= 52, 其餘淘汰
+
+    v2 改動：
+    - 漲幅 25 → 15（已暴漲的隔日跳空也買不便宜，降低權重）
+    - 乖離率 15 → 20（≤3% 滿分，>8% 直接 0 分）
+    - 壓力位 5 → 10（接近壓力的目標難達）
     """
     score = 0
 
-    # 漲幅（25分）
+    # 漲幅（15分）── 2~5% 區間最高分；過度上漲反而扣分
     chg = entry.get('change', 0)
-    if   chg >= 7:   score += 25
-    elif chg >= 5:   score += 20
-    elif chg >= 3.5: score += 15
-    elif chg >= 2:   score += 10
-    elif chg >= 1:   score += 5
+    if   3 <= chg <= 5:   score += 15
+    elif 2 <= chg < 3:    score += 12
+    elif 5 < chg <= 7:    score += 10
+    elif 1 <= chg < 2:    score += 8
+    elif chg > 7:         score += 5   # 漲停板 / 接近漲停，難進場
 
     # 量比（20分）
     vr = entry.get('vol_ratio', 0)
@@ -657,26 +662,28 @@ def calc_score(entry):
     elif total >= 100000:          score += 8
     else:                          score += 3
 
-    # 乖離率（15分）
+    # 乖離率（20分）── 越低越好（容易回檔買到）
     b  = entry.get('bias') or {}
     bp = b.get('bias_pct')
-    if bp is None:         score += 8
-    elif 0 <= bp <= 5:     score += 15
-    elif bp < 0:           score += 10
+    if bp is None:         score += 10
+    elif bp < 0:           score += 18           # 在均線下方
+    elif 0 <= bp <= 3:     score += 20           # 完美區
+    elif bp <= 5:          score += 15
     elif bp <= 8:          score += 5
+    # bp > 8 → 0 分（過熱）
 
     # RSI（10分）
     adv = entry.get('adv') or {}
     rsi = adv.get('rsi')
     if rsi is None:        score += 5
     elif 60 <= rsi <= 80:  score += 10
-    elif rsi > 80:         score += 8
-    elif rsi >= 50:        score += 5
+    elif rsi > 80:         score += 5            # 過熱
+    elif rsi >= 50:        score += 7
 
-    # 壓力位（5分）
+    # 壓力位（10分）
     rs = adv.get('resistance_score', 0)
-    if rs == 0:            score += 5
-    elif rs == -0.25:      score += 2
+    if rs == 0:            score += 10           # 無明顯壓力
+    elif rs == -0.25:      score += 4            # 接近壓力
 
     # 位階（5分）
     ps = adv.get('position_score', 0)
@@ -704,9 +711,9 @@ def calc_score(entry):
 
 def calc_bias_and_entry(df, price):
     """
-    計算 10 日乖離率與建議入場價、目標價、停損價。
-    回傳 dict：bias_pct, bias_label, bias_emoji,
-               entry_price, target1, target2, stop_loss
+    計算 10 日乖離率（給評分用）。
+    v2 後 entry_price/target/stop_loss 改由 actual_entry 在 T+1 回填，
+    此函式不再回傳建議入場價，僅回傳 bias 相關資訊。
     """
     if len(df) < 10:
         return None
@@ -730,27 +737,177 @@ def calc_bias_and_entry(df, price):
         bias_emoji = '🔄'
         bias_label = '底部觀察'
 
-    # 建議入場價：現價×0.98、MA10×1.02、近3日最低，取最低
-    recent3_low  = df['close'].tail(3).min()
-    candidate_a  = round(price * 0.98, 1)
-    candidate_b  = round(ma10 * 1.02, 1)
-    candidate_c  = round(float(recent3_low), 1)
-    entry_price  = min(candidate_a, candidate_b, candidate_c)
-
-    # 目標價（以 MA10 為基準算乖離）
-    target1   = round(ma10 * 1.08, 1)
-    target2   = round(ma10 * 1.12, 1)
-    stop_loss = round(price * 0.95, 1)
-
     return {
         'bias_pct':   bias_pct,
         'bias_label': bias_label,
         'bias_emoji': bias_emoji,
-        'entry_price': entry_price,
-        'target1':    target1,
-        'target2':    target2,
-        'stop_loss':  stop_loss,
     }
+
+
+# ══════════════════════════════════════════════════════
+# T+1 撮合：把 fill_status='pending' 的紀錄用 T+1 K 棒判定進場
+# ══════════════════════════════════════════════════════
+def _fetch_t1_kbar(sid, screen_date):
+    """
+    抓 screen_date 之後第一個交易日的 K 棒（T+1）。
+    回傳 dict: {date, open, high, low, close} 或 None。
+    """
+    if not _DB_OK:
+        return None
+    yyyymm = screen_date.strftime('%Y%m')
+    df = fetch_stock_day_fast(sid, yyyymm)
+    if df.empty:
+        return None
+    # 也可能 T+1 落在下個月（screen_date 接近月底時）
+    after = df[df['date'] > screen_date].copy()
+    if after.empty:
+        # 試下個月
+        next_month = (screen_date.replace(day=1) + timedelta(days=32)).strftime('%Y%m')
+        df2 = fetch_stock_day_fast(sid, next_month)
+        if df2.empty:
+            return None
+        after = df2[df2['date'] > screen_date].copy()
+    if after.empty:
+        return None
+    # 還需要 open；fetch_stock_day_fast 目前沒抓 open
+    # 從原始 df 取第一欄 reload 一次拿開盤
+    return None  # 暫位，下面用更完整的 helper 取代
+
+
+def _fetch_kbars_with_open(sid, yyyymm):
+    """
+    與 fetch_stock_day_fast 類似，但同時取 open（第 4 欄）。
+    回傳含 date, open, high, low, close, volume 的 DataFrame。
+    """
+    import re as _re
+    r = safe_get(
+        'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
+        params={'response': 'csv', 'date': yyyymm + '01', 'stockNo': sid},
+        timeout=15, retries=2, wait=8
+    )
+    if r is None or '查詢無資料' in r.text:
+        return pd.DataFrame()
+    try:
+        text  = r.text
+        lines = text.splitlines()
+        header_i = None
+        for i, line in enumerate(lines):
+            if '日期' in line and ('收盤' in line or '成交' in line):
+                header_i = i
+                break
+        if header_i is None:
+            for i, line in enumerate(lines):
+                if _re.search(r'\d{3}/\d{2}/\d{2}', line):
+                    header_i = max(0, i - 1)
+                    break
+        if header_i is None:
+            return pd.DataFrame()
+        csv_text = '\n'.join(lines[header_i:])
+        df = safe_read_csv(csv_text, f'STOCK_DAY-{sid}', min_cols=7)
+        if df.empty:
+            return pd.DataFrame()
+        mask = df.iloc[:, 0].astype(str).str.match(r'^\d{3}/\d{2}/\d{2}$', na=False)
+        df   = df[mask].copy()
+        if df.empty:
+            return pd.DataFrame()
+        def roc_to_date(s):
+            y, m, d = str(s).split('/')
+            return datetime(int(y) + 1911, int(m), int(d)).date()
+        df['date']   = df.iloc[:, 0].apply(roc_to_date)
+        df['open']   = pd.to_numeric(df.iloc[:, 3].astype(str).str.replace(',', ''), errors='coerce')
+        df['high']   = pd.to_numeric(df.iloc[:, 4].astype(str).str.replace(',', ''), errors='coerce')
+        df['low']    = pd.to_numeric(df.iloc[:, 5].astype(str).str.replace(',', ''), errors='coerce')
+        df['close']  = pd.to_numeric(df.iloc[:, 6].astype(str).str.replace(',', ''), errors='coerce')
+        df['volume'] = pd.to_numeric(df.iloc[:, 1].astype(str).str.replace(',', ''), errors='coerce')
+        cols = ['date', 'open', 'high', 'low', 'close', 'volume']
+        return df[cols].dropna(subset=['date', 'close']).reset_index(drop=True)
+    except Exception:
+        return pd.DataFrame()
+
+
+def get_t1_kbar(sid, screen_date):
+    """取 sid 在 screen_date 之後第一個交易日的 K 棒"""
+    yyyymm = screen_date.strftime('%Y%m')
+    df = _fetch_kbars_with_open(sid, yyyymm)
+    after = df[df['date'] > screen_date] if not df.empty else None
+    if after is None or after.empty:
+        # 試下個月
+        next_dt = screen_date.replace(day=28) + timedelta(days=4)
+        next_month = next_dt.strftime('%Y%m')
+        df2 = _fetch_kbars_with_open(sid, next_month)
+        if df2.empty:
+            return None
+        after = df2[df2['date'] > screen_date]
+    if after.empty:
+        return None
+    row = after.iloc[0]
+    return {
+        'date':  row['date'],
+        'open':  float(row['open']),
+        'high':  float(row['high']),
+        'low':   float(row['low']),
+        'close': float(row['close']),
+    }
+
+
+def get_period_kbars(sid, start_date, end_date):
+    """取 sid 在 [start_date, end_date]（含）區間的 K 棒"""
+    months = set()
+    d = start_date.replace(day=1)
+    while d <= end_date:
+        months.add(d.strftime('%Y%m'))
+        # 下個月
+        d = (d + timedelta(days=32)).replace(day=1)
+    frames = []
+    for ym in sorted(months):
+        df = _fetch_kbars_with_open(sid, ym)
+        if not df.empty:
+            frames.append(df)
+        time.sleep(0.5)
+    if not frames:
+        return pd.DataFrame()
+    full = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['date'])
+    return full[(full['date'] >= start_date) & (full['date'] <= end_date)].reset_index(drop=True)
+
+
+def fill_pending_t1_entries(today):
+    """
+    把所有 fill_status='pending' 且 screen_date < today 的紀錄
+    用其 T+1 K 棒判定進場結果（成交/未進場），寫回 DB。
+    跨 guild 共用（同一個 sid+screen_date 的紀錄會多次更新，但結果相同）。
+    """
+    if not _DB_OK:
+        return
+    pendings = _db.get_records_needing_t1_check(today)
+    if not pendings:
+        print('[T+1撮合] 無待撮合紀錄')
+        return
+    # 同 (sid, screen_date) 只抓一次 K 棒
+    cache = {}
+    for r in pendings:
+        sid = r['sid']
+        sd  = r['screen_date']
+        key = (sid, sd)
+        if key not in cache:
+            cache[key] = get_t1_kbar(sid, sd)
+            time.sleep(0.4)  # 避免 TWSE 限速
+        kbar = cache[key]
+        if kbar is None:
+            print(f'[T+1撮合] {sid} {sd} 抓不到 T+1 K 棒，先跳過')
+            continue
+        status, fill_price = _db.determine_t1_fill(
+            kbar['open'], kbar['high'], kbar['low'],
+            float(r['entry_zone_low']) if r['entry_zone_low'] is not None else None,
+            float(r['entry_zone_high']) if r['entry_zone_high'] is not None else None,
+        )
+        try:
+            _db.fill_t1_entry(r['id'], kbar['date'], status, fill_price)
+            tag = '✅成交' if status == 'filled' else '❌未進場'
+            fp  = f'@{fill_price}' if fill_price else ''
+            print(f'[T+1撮合] {sid} {sd} → {kbar["date"]} {tag} {fp}')
+        except Exception as e:
+            print(f'[T+1撮合] {sid} 寫入失敗：{e}')
+    print(f'[T+1撮合] 完成，處理 {len(pendings)} 筆')
 
 
 INDICATOR_GUIDE = """
@@ -1193,6 +1350,14 @@ def run_analysis():
             except Exception as _dbe:
                 print(f"[DB] 寫入失敗：{_dbe}")
 
+            # T+1 撮合：把今天以前 fill_status='pending' 的紀錄，用其 T+1 K 棒判定進場
+            try:
+                from datetime import date as _date2
+                _today = _date2(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
+                fill_pending_t1_entries(_today)
+            except Exception as _fe:
+                print(f"[T+1撮合] 失敗：{_fe}")
+
             # 匯出至 Web Dashboard（GitHub Pages）
             try:
                 import web_export as _we
@@ -1222,13 +1387,16 @@ def run_analysis():
             if b:
                 sp = '+' if b['bias_pct'] >= 0 else ''
                 lines.append(f"乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
-                lines += ['', '🎯價格建議',
-                          f"建議入場：{b['entry_price']:,.1f} 元",
-                          f"目標一：{b['target1']:,.1f} 元　目標二：{b['target2']:,.1f} 元"]
+            # 建議進場區間：[close × 0.97, close × 1.00]
+            # 隔日 T+1 必須觸及此區間才算進場（沒觸到 → 未進場，不計入賺錢勝率）
+            # 實際成交後 target/stop 由 actual_entry × (1.05/1.10/0.95) 算
+            zone_low  = round(e['price'] * 0.97, 1)
+            zone_high = round(e['price'] * 1.00, 1)
+            lines += ['', '🎯建議進場區（限價單）',
+                      f"進場區間：{zone_low:,.1f} ~ {zone_high:,.1f} 元",
+                      f"➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%"]
             if adv.get('atr_stop'):
-                lines.append(f"動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
-            elif b:
-                lines.append(f"停損參考：{b['stop_loss']:,.1f} 元（-5%）")
+                lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
             has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
                            adv.get('position_label'), adv.get('obv_label'),
                            (e.get('chip_label') and e.get('chip_score', 0) > 0),

@@ -961,7 +961,12 @@ class InteractionHandler(BaseHTTPRequestHandler):
 def settle_weekly(settle_date, round_num, guild_id='default'):
     """
     結算 settle_date 這天到期的第 round_num 次結算。
-    自動抓每支股票最新收盤、計算報酬率、寫回DB、發送報告。
+    v3 改動：
+      - 只結算 fill_status='filled' 的紀錄（未進場的不計）
+      - 報酬以 actual_entry_price 為基準
+      - 抓 actual_entry_date ~ settle_date 整段 K 棒，檢查盤中是否觸 target/stop
+      - 若觸停損 → settle_pct 強制視為 -5%（停損出場）
+      - 否則 settle_pct = (settle_close - actual_entry) / actual_entry × 100
     """
     import requests as req
     webhook = os.environ.get('DISCORD_WEBHOOK', '')
@@ -974,28 +979,56 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
         return
 
     round_label = f'第{"一" if round_num==1 else "二"}次結算（{"1週" if round_num==1 else "2週"}）'
-    # 找篩選週區間
     screen_dates = sorted(set(str(r['screen_date']) for r in records))
     week_range   = f'{screen_dates[0]} ~ {screen_dates[-1]}'
 
     results = []
     for r in records:
-        cur_price = get_latest_price(r['sid'])
-        if cur_price is None:
+        actual_entry      = float(r['actual_entry_price'])
+        actual_entry_date = r['actual_entry_date']
+        t1 = float(r['actual_target1']) if r['actual_target1'] else None
+        t2 = float(r['actual_target2']) if r['actual_target2'] else None
+        sl = float(r['actual_stop_loss']) if r['actual_stop_loss'] else None
+
+        # 抓 actual_entry_date ~ settle_date 整段 K 棒
+        df = sb.get_period_kbars(r['sid'], actual_entry_date, settle_date)
+        if df.empty:
+            print(f"[結算] {r['sid']} 抓不到 K 棒，跳過")
             continue
-        base  = float(r['close_price'])
-        pct   = round((cur_price - base) / base * 100, 2)
-        t1    = float(r['target1']) if r['target1'] else None
-        t2    = float(r['target2']) if r['target2'] else None
-        sl    = float(r['stop_loss']) if r['stop_loss'] else None
-        hit_t1 = t1 is not None and cur_price >= t1
-        hit_t2 = t2 is not None and cur_price >= t2
-        hit_sl = sl is not None and cur_price <= sl
-        _db.update_settle(r['id'], round_num, cur_price, hit_t1, hit_t2, hit_sl)
+        # 找最新的 close 當 settle_close（K 棒最後一天 ≤ settle_date）
+        last_row     = df.iloc[-1]
+        settle_close = float(last_row['close'])
+
+        # 掃每天 high/low 檢查觸發
+        hit_t1 = hit_t2 = hit_sl = False
+        hit_t1_date = hit_t2_date = hit_sl_date = None
+        for _, row in df.iterrows():
+            d  = row['date']
+            hi = float(row['high'])
+            lo = float(row['low'])
+            if t1 and not hit_t1 and hi >= t1:
+                hit_t1, hit_t1_date = True, d
+            if t2 and not hit_t2 and hi >= t2:
+                hit_t2, hit_t2_date = True, d
+            if sl and not hit_sl and lo <= sl:
+                hit_sl, hit_sl_date = True, d
+
+        # 報酬：若觸停損 → 視為停損出場 -5%；否則用 settle_close
+        if hit_sl:
+            settle_pct = round((sl - actual_entry) / actual_entry * 100, 2)
+        else:
+            settle_pct = round((settle_close - actual_entry) / actual_entry * 100, 2)
+
+        _db.update_settle(
+            r['id'], round_num, settle_close,
+            hit_t1, hit_t2, hit_sl,
+            hit_t1_date, hit_t2_date, hit_sl_date,
+            settle_pct=settle_pct,
+        )
         results.append({
             'sid': r['sid'], 'name': r.get('name',''),
-            'grade': r['grade'], 'base': base,
-            'cur': cur_price, 'pct': pct,
+            'grade': r['grade'], 'base': actual_entry,
+            'cur': settle_close, 'pct': settle_pct,
             't1': t1, 't2': t2, 'sl': sl,
             'hit_t1': hit_t1, 'hit_t2': hit_t2, 'hit_sl': hit_sl,
             'pos_pct': float(r['position_pct']) if r['position_pct'] else 0,
@@ -1032,7 +1065,7 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
 
         lines.append(
             f'{emoji} **{r["sid"]} {r["name"]}**｜{r["grade"]} 級\n'
-            f'   篩選價 {r["base"]:,.1f} → 結算價 {r["cur"]:,.1f}（{sign}{r["pct"]}%）\n'
+            f'   實際進場 {r["base"]:,.1f} → 結算價 {r["cur"]:,.1f}（{sign}{r["pct"]}%）\n'
             f'   {t1_str}{t2_str}{sl_str}\n'
             f'   建議倉位 {r["pos_pct"]}%　假設投入 {invest:,.0f} 元 → **{pnl_str} 元**'
         )

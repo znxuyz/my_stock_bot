@@ -1,8 +1,15 @@
 """
-資料庫模組 db.py ── 多伺服器版
+資料庫模組 db.py ── 多伺服器版（v2：實際進場價策略）
 ================================
-所有涉及用戶資料的操作都以 (guild_id, user_id) 為 key
-分析結果、結算報告以 guild_id 為 key
+【策略改動 v2】
+舊：以篩選日收盤 close_price 為基準計算結算報酬，會美化勝率
+新：以隔日 T+1 開盤 actual_entry_price 為基準（無腦市價買，保證能成交）
+    target/stop 改用 actual_entry × (1.05/1.10/0.95)
+    settle_pct = (settle_close - actual_entry) / actual_entry × 100
+    若持有期間 low 觸到 stop_loss → settle_pct 強制視為 -5%（停損出場）
+    target1/2 達標只是 informational hit 旗標，不影響 settle_pct（讓利潤奔跑）
+所有用戶資料以 (guild_id, user_id) 為 key
+篩選/結算結果以 guild_id 為 key
 """
 
 import os
@@ -14,56 +21,50 @@ def get_conn():
     url = os.environ.get('DATABASE_URL', '')
     if not url:
         raise Exception('DATABASE_URL 環境變數未設定')
-    # psycopg2 需要 postgresql:// 而非 postgres://
     if url.startswith('postgres://'):
         url = url.replace('postgres://', 'postgresql://', 1)
     return psycopg2.connect(url)
 
+
+# 手動觸發舊資料清空：將此值改為 v3、v4… 即可重建 screen_records
+SCHEMA_VERSION = 'v3-entry-zone'
+
+
+def _ensure_schema_version_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS schema_version (
+            key   VARCHAR(50) PRIMARY KEY,
+            value VARCHAR(50) NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+
+def _get_schema_version(cur):
+    _ensure_schema_version_table(cur)
+    cur.execute("SELECT value FROM schema_version WHERE key = 'screen_records'")
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
+def _set_schema_version(cur, version):
+    cur.execute("""
+        INSERT INTO schema_version (key, value) VALUES ('screen_records', %s)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+    """, (version,))
+
+
 def init_db():
-    ddl = """
-    -- 伺服器設定
+    """
+    初始化資料表。若 screen_records schema 版本不符，自動 DROP 重建（清空舊資料）。
+    """
+    other_ddl = """
     CREATE TABLE IF NOT EXISTS guild_settings (
         guild_id    VARCHAR(30) PRIMARY KEY,
         webhook_url TEXT NOT NULL,
         setup_by    VARCHAR(30),
         created_at  TIMESTAMP DEFAULT NOW()
     );
-
-    -- 每日篩選記錄（含 guild_id，每個伺服器各自結算）
-    CREATE TABLE IF NOT EXISTS screen_records (
-        id              SERIAL PRIMARY KEY,
-        guild_id        VARCHAR(30) NOT NULL,
-        screen_date     DATE NOT NULL,
-        sid             VARCHAR(10) NOT NULL,
-        name            VARCHAR(50),
-        grade           VARCHAR(5),
-        close_price     NUMERIC(12,2),
-        change_pct      NUMERIC(8,2),
-        vol_ratio       NUMERIC(8,2),
-        foreign_shares  BIGINT,
-        trust_shares    BIGINT,
-        bias_pct        NUMERIC(8,2),
-        bias_label      VARCHAR(20),
-        entry_price     NUMERIC(12,2),
-        target1         NUMERIC(12,2),
-        target2         NUMERIC(12,2),
-        stop_loss       NUMERIC(12,2),
-        position_pct    NUMERIC(5,1),
-        settle1_date    DATE,
-        settle2_date    DATE,
-        settle1_price   NUMERIC(12,2),
-        settle2_price   NUMERIC(12,2),
-        settle1_pct     NUMERIC(8,2),
-        settle2_pct     NUMERIC(8,2),
-        settle1_done    BOOLEAN DEFAULT FALSE,
-        settle2_done    BOOLEAN DEFAULT FALSE,
-        hit_target1     BOOLEAN,
-        hit_target2     BOOLEAN,
-        hit_stoploss    BOOLEAN,
-        created_at      TIMESTAMP DEFAULT NOW()
-    );
-
-    -- 持倉記錄（guild_id + user_id 隔離）
     CREATE TABLE IF NOT EXISTS holdings (
         id          SERIAL PRIMARY KEY,
         guild_id    VARCHAR(30) NOT NULL,
@@ -74,8 +75,6 @@ def init_db():
         buy_date    DATE NOT NULL,
         created_at  TIMESTAMP DEFAULT NOW()
     );
-
-    -- 交易記錄（guild_id + user_id 隔離）
     CREATE TABLE IF NOT EXISTS trades (
         id          SERIAL PRIMARY KEY,
         guild_id    VARCHAR(30) NOT NULL,
@@ -88,8 +87,6 @@ def init_db():
         trade_date  DATE NOT NULL,
         created_at  TIMESTAMP DEFAULT NOW()
     );
-
-    -- 損益累計（guild_id + user_id 隔離）
     CREATE TABLE IF NOT EXISTS pnl_summary (
         guild_id    VARCHAR(30) NOT NULL,
         user_id     VARCHAR(30) NOT NULL,
@@ -97,8 +94,6 @@ def init_db():
         updated_at  TIMESTAMP DEFAULT NOW(),
         PRIMARY KEY (guild_id, user_id)
     );
-
-    -- 選股挑戰（guild_id 隔離）
     CREATE TABLE IF NOT EXISTS challenges (
         id          SERIAL PRIMARY KEY,
         guild_id    VARCHAR(30) NOT NULL,
@@ -111,11 +106,69 @@ def init_db():
         UNIQUE(guild_id, user_id, week_key)
     );
     """
+
+    screen_ddl = """
+    CREATE TABLE IF NOT EXISTS screen_records (
+        id                 SERIAL PRIMARY KEY,
+        guild_id           VARCHAR(30) NOT NULL,
+        screen_date        DATE NOT NULL,
+        sid                VARCHAR(10) NOT NULL,
+        name               VARCHAR(50),
+        grade              VARCHAR(5),
+        score              INT,
+        close_price        NUMERIC(12,2),       -- 篩選日收盤（僅參考）
+        change_pct         NUMERIC(8,2),
+        vol_ratio          NUMERIC(8,2),
+        foreign_shares     BIGINT,
+        trust_shares       BIGINT,
+        bias_pct           NUMERIC(8,2),
+        bias_label         VARCHAR(20),
+        position_pct       NUMERIC(5,1),
+        -- 建議進場區間（T 日寫入）
+        entry_zone_low     NUMERIC(12,2),       -- close × 0.97
+        entry_zone_high    NUMERIC(12,2),       -- close × 1.00
+        -- 實際進場：T+1 撮合後回填
+        actual_entry_date  DATE,                -- T+1 日期（檢查後寫入，無論成交與否）
+        actual_entry_price NUMERIC(12,2),       -- 實際成交價（NULL=未進場）
+        actual_target1     NUMERIC(12,2),       -- entry × 1.05
+        actual_target2     NUMERIC(12,2),       -- entry × 1.10
+        actual_stop_loss   NUMERIC(12,2),       -- entry × 0.95
+        fill_status        VARCHAR(10) DEFAULT 'pending',  -- pending/filled/missed
+        -- 結算
+        settle1_date       DATE,
+        settle2_date       DATE,
+        settle1_price      NUMERIC(12,2),
+        settle2_price      NUMERIC(12,2),
+        settle1_pct        NUMERIC(8,2),
+        settle2_pct        NUMERIC(8,2),
+        settle1_done       BOOLEAN DEFAULT FALSE,
+        settle2_done       BOOLEAN DEFAULT FALSE,
+        -- 持有期間觸發
+        hit_target1        BOOLEAN,
+        hit_target2        BOOLEAN,
+        hit_stoploss       BOOLEAN,
+        hit_target1_date   DATE,
+        hit_target2_date   DATE,
+        hit_stoploss_date  DATE,
+        created_at         TIMESTAMP DEFAULT NOW()
+    );
+    """
+
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(ddl)
+            cur.execute(other_ddl)
+            ver = _get_schema_version(cur)
+            if ver != SCHEMA_VERSION:
+                # schema 版本不符，DROP 重建（清空舊資料）
+                print(f"[DB] screen_records schema 升級：{ver} → {SCHEMA_VERSION}（清空舊資料）")
+                cur.execute("DROP TABLE IF EXISTS screen_records")
+                cur.execute(screen_ddl)
+                _set_schema_version(cur, SCHEMA_VERSION)
+            else:
+                cur.execute(screen_ddl)
         conn.commit()
-    print("[DB] 資料表初始化完成")
+    print(f"[DB] 資料表初始化完成（screen_records {SCHEMA_VERSION}）")
+
 
 # ══════════════════════════════════════════════════
 # 伺服器設定
@@ -141,7 +194,6 @@ def remove_guild(guild_id):
         conn.commit()
 
 def get_all_webhooks():
-    """取得所有已設定伺服器的 webhook"""
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute("SELECT guild_id, webhook_url FROM guild_settings")
@@ -182,29 +234,37 @@ def calc_position_pct(grade, bias_pct):
     return 0.0
 
 def save_screen_records(records, screen_date, guild_id):
+    """
+    寫入篩選結果。actual_entry_* 留 NULL，由 fill_t1_entry 在 T+1 後回填。
+    建議進場區間 = [close × 0.97, close × 1.00]
+    """
     settle1 = next_friday(screen_date, 1)
     settle2 = next_friday(screen_date, 2)
     rows = []
     for e in records:
         b   = e.get('bias') or {}
         pos = calc_position_pct(e.get('grade',''), b.get('bias_pct'))
+        close = float(e.get('price', 0))
+        zone_low  = round(close * 0.97, 2)
+        zone_high = round(close * 1.00, 2)
         rows.append((
             guild_id, screen_date,
             e['sid'], e.get('name',''), e.get('grade',''),
-            e.get('price',0), e.get('change',0), e.get('vol_ratio',0),
-            e.get('foreign',0), e.get('trust',0),
-            b.get('bias_pct'), b.get('bias_label',''),
-            b.get('entry_price'), b.get('target1'),
-            b.get('target2'), b.get('stop_loss'),
-            pos, settle1, settle2,
+            int(e.get('score', 0)),
+            close, e.get('change', 0), e.get('vol_ratio', 0),
+            e.get('foreign', 0), e.get('trust', 0),
+            b.get('bias_pct'), b.get('bias_label', ''),
+            pos, zone_low, zone_high,
+            settle1, settle2,
         ))
     sql = """
     INSERT INTO screen_records
-      (guild_id, screen_date, sid, name, grade, close_price,
+      (guild_id, screen_date, sid, name, grade, score, close_price,
        change_pct, vol_ratio, foreign_shares, trust_shares,
-       bias_pct, bias_label, entry_price, target1, target2,
-       stop_loss, position_pct, settle1_date, settle2_date)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+       bias_pct, bias_label, position_pct,
+       entry_zone_low, entry_zone_high,
+       settle1_date, settle2_date)
+    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -212,43 +272,139 @@ def save_screen_records(records, screen_date, guild_id):
         conn.commit()
     print(f"[DB] 寫入 {len(rows)} 筆篩選記錄（{screen_date} guild:{guild_id}）")
 
+
+def get_records_needing_t1_check(before_date):
+    """
+    撈取 fill_status='pending' 且 screen_date < before_date 的紀錄
+    （由呼叫端在 T+1 抓 K 棒判定是否成交）
+    """
+    sql = """
+    SELECT id, guild_id, screen_date, sid, name, close_price,
+           entry_zone_low, entry_zone_high
+    FROM screen_records
+    WHERE fill_status = 'pending' AND screen_date < %s
+    ORDER BY screen_date, sid
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (before_date,))
+            return cur.fetchall()
+
+
+def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high):
+    """
+    根據 T+1 K 棒 + 進場區間決定撮合結果。
+    回傳 (status, fill_price)：
+      ('filled', price) - 成交
+      ('missed', None)  - 未進場
+    撮合規則（限價單模擬）：
+      A. 開盤在區間內       → 以開盤成交（最佳）
+      B. 開盤跳空高於區間   → 若盤中 low ≤ zone_high，以 zone_high 成交；否則 missed
+      C. 開盤跳空低於區間   → 以開盤成交（撿便宜）
+    """
+    if zone_low is None or zone_high is None or t1_open is None:
+        return 'missed', None
+    o = float(t1_open)
+    lo = float(t1_low) if t1_low is not None else o
+    zl = float(zone_low)
+    zh = float(zone_high)
+    if zl <= o <= zh:
+        return 'filled', round(o, 2)
+    if o > zh:
+        if lo <= zh:
+            return 'filled', round(zh, 2)
+        return 'missed', None
+    # o < zl：跳空跌破區間下限，視為以開盤成交（更便宜）
+    return 'filled', round(o, 2)
+
+
+def fill_t1_entry(record_id, t1_date, status, entry_price):
+    """
+    寫入 T+1 撮合結果。
+      filled: 設 actual_entry_price + 三個目標停損
+      missed: actual_entry_price 留 NULL
+    """
+    if status == 'filled' and entry_price is not None:
+        e   = float(entry_price)
+        t1  = round(e * 1.05, 2)
+        t2  = round(e * 1.10, 2)
+        sl  = round(e * 0.95, 2)
+        sql = """
+        UPDATE screen_records SET
+            actual_entry_date  = %s,
+            actual_entry_price = %s,
+            actual_target1     = %s,
+            actual_target2     = %s,
+            actual_stop_loss   = %s,
+            fill_status        = 'filled'
+        WHERE id = %s
+        """
+        params = (t1_date, e, t1, t2, sl, record_id)
+    else:
+        sql = """
+        UPDATE screen_records SET
+            actual_entry_date = %s,
+            fill_status       = 'missed'
+        WHERE id = %s
+        """
+        params = (t1_date, record_id)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+        conn.commit()
+
+
 def get_pending_settle(settle_date, round_num, guild_id):
+    """撈出指定 settle_date 待結算的紀錄（fill_status='filled' 才能結算）"""
     col_done = 'settle1_done' if round_num == 1 else 'settle2_done'
     col_date = 'settle1_date' if round_num == 1 else 'settle2_date'
     sql = f"""
     SELECT * FROM screen_records
     WHERE guild_id = %s AND {col_date} = %s AND {col_done} = FALSE
+      AND fill_status = 'filled' AND actual_entry_price IS NOT NULL
     """
     with get_conn() as conn:
         with conn.cursor(cursor_factory=RealDictCursor) as cur:
             cur.execute(sql, (guild_id, settle_date))
             return cur.fetchall()
 
-def update_settle(record_id, round_num, settle_price,
-                  hit_target1=None, hit_target2=None, hit_stoploss=None):
+
+def update_settle(record_id, round_num, settle_close,
+                  hit_target1=None, hit_target2=None, hit_stoploss=None,
+                  hit_target1_date=None, hit_target2_date=None, hit_stoploss_date=None,
+                  settle_pct=None):
+    """
+    寫入結算結果。
+    settle_pct 由呼叫端傳入（已考慮停損強制 -5%）。
+    """
     if round_num == 1:
         sql = """
         UPDATE screen_records SET
-            settle1_price = %s,
-            settle1_pct   = ROUND(((%s - close_price)/close_price*100)::numeric,2),
-            settle1_done  = TRUE,
-            hit_target1   = %s, hit_target2 = %s, hit_stoploss = %s
+            settle1_price = %s, settle1_pct = %s, settle1_done = TRUE,
+            hit_target1 = %s, hit_target2 = %s, hit_stoploss = %s,
+            hit_target1_date = COALESCE(hit_target1_date, %s),
+            hit_target2_date = COALESCE(hit_target2_date, %s),
+            hit_stoploss_date = COALESCE(hit_stoploss_date, %s)
         WHERE id = %s
         """
     else:
         sql = """
         UPDATE screen_records SET
-            settle2_price = %s,
-            settle2_pct   = ROUND(((%s - close_price)/close_price*100)::numeric,2),
-            settle2_done  = TRUE,
-            hit_target1   = %s, hit_target2 = %s, hit_stoploss = %s
+            settle2_price = %s, settle2_pct = %s, settle2_done = TRUE,
+            hit_target1 = %s, hit_target2 = %s, hit_stoploss = %s,
+            hit_target1_date = COALESCE(hit_target1_date, %s),
+            hit_target2_date = COALESCE(hit_target2_date, %s),
+            hit_stoploss_date = COALESCE(hit_stoploss_date, %s)
         WHERE id = %s
         """
     with get_conn() as conn:
         with conn.cursor() as cur:
-            cur.execute(sql, (settle_price, settle_price,
-                              hit_target1, hit_target2, hit_stoploss, record_id))
+            cur.execute(sql, (settle_close, settle_pct,
+                              hit_target1, hit_target2, hit_stoploss,
+                              hit_target1_date, hit_target2_date, hit_stoploss_date,
+                              record_id))
         conn.commit()
+
 
 def get_cumulative_stats(guild_id):
     grade_sql = """
@@ -312,11 +468,10 @@ def get_total_screened(guild_id):
 
 # ══════════════════════════════════════════════════
 # 跨伺服器彙總（給 Web Dashboard 使用）
-#   因為所有 guild 的 screen_records 內容相同（同一份篩選結果存多份），
+#   因為所有 guild 的 screen_records 內容相同，
 #   彙總時用 DISTINCT ON (screen_date, sid) 避免重複計算。
 # ══════════════════════════════════════════════════
 def get_latest_screen_date():
-    """取得最近一次篩選日期（任一 guild）"""
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT MAX(screen_date) FROM screen_records")
@@ -324,15 +479,18 @@ def get_latest_screen_date():
             return row[0] if row and row[0] else None
 
 def get_screens_by_date(screen_date):
-    """取得指定日期的所有篩選股票（去除 guild 重複）"""
     sql = """
     SELECT DISTINCT ON (sid)
-        screen_date, sid, name, grade, close_price, change_pct,
+        screen_date, sid, name, grade, score, close_price, change_pct,
         vol_ratio, foreign_shares, trust_shares, bias_pct, bias_label,
-        entry_price, target1, target2, stop_loss, position_pct,
+        position_pct,
+        entry_zone_low, entry_zone_high, fill_status,
+        actual_entry_date, actual_entry_price,
+        actual_target1, actual_target2, actual_stop_loss,
         settle1_date, settle2_date, settle1_price, settle2_price,
         settle1_pct, settle2_pct, settle1_done, settle2_done,
-        hit_target1, hit_target2, hit_stoploss
+        hit_target1, hit_target2, hit_stoploss,
+        hit_target1_date, hit_target2_date, hit_stoploss_date
     FROM screen_records
     WHERE screen_date = %s
     ORDER BY sid, id
@@ -343,13 +501,16 @@ def get_screens_by_date(screen_date):
             return cur.fetchall()
 
 def get_history_records(limit_days=90):
-    """取得最近 N 天的所有篩選紀錄（去除 guild 重複），給歷史頁使用"""
     sql = """
     SELECT DISTINCT ON (screen_date, sid)
-        screen_date, sid, name, grade, close_price, change_pct,
-        vol_ratio, bias_pct, entry_price, target1, target2, stop_loss,
+        screen_date, sid, name, grade, score, close_price, change_pct,
+        vol_ratio, bias_pct,
+        entry_zone_low, entry_zone_high, fill_status,
+        actual_entry_date, actual_entry_price,
+        actual_target1, actual_target2, actual_stop_loss,
         settle1_pct, settle2_pct, settle1_done, settle2_done,
-        hit_target1, hit_target2, hit_stoploss
+        hit_target1, hit_target2, hit_stoploss,
+        hit_target1_date, hit_target2_date, hit_stoploss_date
     FROM screen_records
     WHERE screen_date >= CURRENT_DATE - %s::int
     ORDER BY screen_date DESC, sid, id
@@ -360,17 +521,20 @@ def get_history_records(limit_days=90):
             return cur.fetchall()
 
 def get_aggregated_stats():
-    """跨伺服器彙總勝率（依等級分組）"""
     grade_sql = """
     WITH dedup AS (
         SELECT DISTINCT ON (screen_date, sid)
-            grade, settle1_pct, settle2_pct, settle1_done, settle2_done,
+            grade, fill_status,
+            settle1_pct, settle2_pct, settle1_done, settle2_done,
             hit_target1, hit_target2, hit_stoploss
         FROM screen_records
         ORDER BY screen_date, sid, id
     )
     SELECT grade,
         COUNT(*) AS total,
+        SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
+        SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
+        SUM(CASE WHEN fill_status='pending' THEN 1 ELSE 0 END) AS pending,
         SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled1,
         SUM(CASE WHEN settle2_done THEN 1 ELSE 0 END) AS settled2,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win1,
@@ -437,16 +601,18 @@ def get_aggregated_stats():
     return out
 
 def get_aggregated_summary():
-    """總覽數字：總篩選數、總結算數、總勝場、平均報酬"""
     sql = """
     WITH dedup AS (
         SELECT DISTINCT ON (screen_date, sid)
-            settle1_pct, settle2_pct, settle1_done, settle2_done
+            fill_status, settle1_pct, settle2_pct, settle1_done, settle2_done
         FROM screen_records
         ORDER BY screen_date, sid, id
     )
     SELECT
         COUNT(*)::int AS total,
+        SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END)::int AS filled,
+        SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END)::int AS missed,
+        SUM(CASE WHEN fill_status='pending' THEN 1 ELSE 0 END)::int AS pending,
         SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END)::int AS settled1,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END)::int AS win1,
         AVG(settle1_pct) AS avg_ret1,
