@@ -410,12 +410,20 @@ def get_cumulative_stats(guild_id):
     grade_sql = """
     SELECT grade,
         COUNT(*) AS total,
+        SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
+        SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
+        SUM(CASE WHEN fill_status='pending' THEN 1 ELSE 0 END) AS pending,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled1,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win1,
         AVG(settle1_pct) AS avg_ret1,
+        SUM(CASE WHEN settle2_done THEN 1 ELSE 0 END) AS settled2,
         SUM(CASE WHEN settle2_pct > 0 THEN 1 ELSE 0 END) AS win2,
-        AVG(settle2_pct) AS avg_ret2
+        AVG(settle2_pct) AS avg_ret2,
+        SUM(CASE WHEN hit_target1 THEN 1 ELSE 0 END) AS hit_t1,
+        SUM(CASE WHEN hit_target2 THEN 1 ELSE 0 END) AS hit_t2,
+        SUM(CASE WHEN hit_stoploss THEN 1 ELSE 0 END) AS hit_sl
     FROM screen_records
-    WHERE guild_id = %s AND settle1_done = TRUE
+    WHERE guild_id = %s
     GROUP BY grade
     ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
                         WHEN 'A' THEN 3 WHEN 'X' THEN 4 END
@@ -427,10 +435,13 @@ def get_cumulative_stats(guild_id):
              WHEN bias_pct > 8  THEN '過高(>8%)'
              ELSE '底部(<0%)' END AS bias_zone,
         COUNT(*) AS total,
+        SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
+        SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
         AVG(settle1_pct) AS avg_ret
     FROM screen_records
-    WHERE guild_id = %s AND settle1_done = TRUE AND bias_pct IS NOT NULL
+    WHERE guild_id = %s AND bias_pct IS NOT NULL
     GROUP BY bias_zone
     """
     dual_sql = """
@@ -438,10 +449,13 @@ def get_cumulative_stats(guild_id):
         CASE WHEN foreign_shares >= 10000 AND trust_shares >= 10000
              THEN '雙買超' ELSE '單方買超' END AS buy_type,
         COUNT(*) AS total,
+        SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
+        SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
+        SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
         AVG(settle1_pct) AS avg_ret
     FROM screen_records
-    WHERE guild_id = %s AND settle1_done = TRUE
+    WHERE guild_id = %s
     GROUP BY buy_type
     """
     grade_rows, bias_rows, dual_rows = [], [], []
