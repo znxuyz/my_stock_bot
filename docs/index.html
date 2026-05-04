@@ -132,6 +132,25 @@
   .modal-body{padding:18px;overflow-y:auto;flex:1;line-height:1.7}
   .modal-body .placeholder{text-align:center;padding:40px 20px;color:var(--muted)}
   .modal-body .placeholder .icon{font-size:48px;margin-bottom:14px}
+  .modal-body h4{margin:18px 0 8px 0;font-size:14px;font-weight:600;color:var(--accent)}
+  .modal-body h4:first-child{margin-top:0}
+  .modal-body .kv{display:grid;grid-template-columns:auto 1fr;gap:6px 14px;font-size:13px;margin:4px 0 10px 0}
+  .modal-body .kv .k{color:var(--muted);white-space:nowrap}
+  .modal-body table.simple{width:100%;border-collapse:collapse;font-size:13px;margin:6px 0}
+  .modal-body table.simple th,.modal-body table.simple td{padding:6px 10px;border-bottom:1px solid var(--border);text-align:left}
+  .modal-body table.simple th{color:var(--muted);font-weight:600;background:var(--panel2)}
+  .modal-body code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:12px}
+  .modal-body .note{color:var(--muted);font-size:12px;margin:6px 0;line-height:1.6}
+  .watchlist-row{display:flex;align-items:center;gap:8px;padding:8px 10px;
+    border-bottom:1px solid var(--border)}
+  .watchlist-row:last-child{border-bottom:none}
+  .watchlist-row .sid{font-weight:700;color:var(--accent);cursor:pointer}
+  .watchlist-row .sid:hover{text-decoration:underline}
+  .watchlist-row .name{flex:1;color:var(--text)}
+  .watchlist-row .added{color:var(--muted);font-size:11px}
+  .watchlist-row button{background:transparent;border:1px solid var(--border);color:var(--muted);
+    cursor:pointer;padding:3px 8px;border-radius:4px;font-size:12px}
+  .watchlist-row button:hover{color:var(--red);border-color:var(--red)}
 </style>
 </head>
 <body>
@@ -304,8 +323,8 @@
 <div class="fab-container" id="fab">
   <button class="fab-main" id="fabMain" aria-label="開啟功能選單">+</button>
   <div class="fab-subs">
-    <button class="fab-sub" data-modal="help" aria-label="指令說明">
-      📚<span class="tip">指令說明</span>
+    <button class="fab-sub" data-modal="params" aria-label="策略參數一覽">
+      📋<span class="tip">策略參數一覽</span>
     </button>
     <button class="fab-sub" data-modal="topflow" aria-label="外資買賣超榜">
       📊<span class="tip">外資買賣超榜</span>
@@ -313,30 +332,24 @@
     <button class="fab-sub" data-modal="stock" aria-label="個股查詢">
       🔍<span class="tip">個股查詢</span>
     </button>
-    <button class="fab-sub" data-modal="fortune" aria-label="每日運勢">
-      🔮<span class="tip">每日運勢</span>
+    <button class="fab-sub" data-modal="indicators" aria-label="指標教學">
+      📚<span class="tip">指標教學</span>
     </button>
-    <button class="fab-sub" data-modal="roast" aria-label="川普評論">
-      🗣️<span class="tip">川普評論</span>
+    <button class="fab-sub" data-modal="watchlist" aria-label="追蹤清單">
+      ⭐<span class="tip">追蹤清單</span>
     </button>
   </div>
 </div>
 
 <!-- ══════════ Modals ══════════ -->
 <div class="modal-backdrop" id="modal-backdrop">
-  <!-- 指令說明 -->
-  <div class="modal" data-modal-content="help" hidden>
+  <!-- 策略參數一覽 -->
+  <div class="modal" data-modal-content="params" hidden>
     <div class="modal-header">
-      <h3>📚 指令說明</h3>
+      <h3>📋 策略參數一覽</h3>
       <button class="modal-close" aria-label="關閉">✕</button>
     </div>
-    <div class="modal-body">
-      <div class="placeholder">
-        <div class="icon">📚</div>
-        <p><b>尚未實作</b></p>
-        <p>未來會列出所有 Discord 指令的用法與範例。</p>
-      </div>
-    </div>
+    <div class="modal-body" id="params-body"></div>
   </div>
   <!-- 外資買賣超榜 -->
   <div class="modal" data-modal-content="topflow" hidden>
@@ -376,33 +389,21 @@
       </div>
     </div>
   </div>
-  <!-- 每日運勢 -->
-  <div class="modal" data-modal-content="fortune" hidden>
+  <!-- 指標教學 -->
+  <div class="modal" data-modal-content="indicators" hidden>
     <div class="modal-header">
-      <h3>🔮 每日運勢</h3>
+      <h3>📚 指標教學</h3>
       <button class="modal-close" aria-label="關閉">✕</button>
     </div>
-    <div class="modal-body">
-      <div class="placeholder">
-        <div class="icon">🔮</div>
-        <p><b>尚未實作</b></p>
-        <p>未來會顯示今日股市運勢（純娛樂）。</p>
-      </div>
-    </div>
+    <div class="modal-body" id="indicators-body"></div>
   </div>
-  <!-- 川普評論 -->
-  <div class="modal" data-modal-content="roast" hidden>
+  <!-- 追蹤清單 -->
+  <div class="modal" data-modal-content="watchlist" hidden>
     <div class="modal-header">
-      <h3>🗣️ 川普評論</h3>
+      <h3>⭐ 追蹤清單</h3>
       <button class="modal-close" aria-label="關閉">✕</button>
     </div>
-    <div class="modal-body">
-      <div class="placeholder">
-        <div class="icon">🗣️</div>
-        <p><b>尚未實作</b></p>
-        <p>未來會用川普語氣評論今日大盤（純娛樂）。</p>
-      </div>
-    </div>
+    <div class="modal-body" id="watchlist-body"></div>
   </div>
 </div>
 
@@ -797,7 +798,10 @@ setInterval(loadAll, 5*60*1000);
   function openModal(name){
     modals.forEach(m => m.hidden = (m.dataset.modalContent !== name));
     backdrop.classList.add('open');
-    if(name === 'stock') initStockModal();
+    if(name === 'stock')      initStockModal();
+    if(name === 'params')     renderParamsModal();
+    if(name === 'indicators') renderIndicatorsModal();
+    if(name === 'watchlist')  renderWatchlistModal();
   }
   function closeModal(){
     backdrop.classList.remove('open');
@@ -1001,6 +1005,222 @@ setInterval(loadAll, 5*60*1000);
       else if(fab.classList.contains('open'))  closeFab();
     }
   });
+
+  // ══════════ 策略參數一覽 ══════════
+  function renderParamsModal(){
+    document.getElementById('params-body').innerHTML = `
+      <h4>🎯 篩選漏斗（依序執行）</h4>
+      <div class="kv">
+        <div class="k">第一輪</div><div>收盤 ≥ <code>10</code> 元　漲幅 ≥ <code>1%</code>　法人雙買超 <b>or</b> 單方買超 ≥ 100K 股</div>
+        <div class="k"></div><div>取法人合計買超 <b>前 30 名</b></div>
+        <div class="k">第二輪</div><div>量比 ≥ <code>1.5x</code>（當日量 ÷ 5 日均量）</div>
+        <div class="k"></div><div>EMA 多頭排列：<code>20 &gt; 60 &gt; 120</code>（資料不足 120 天用備援 <code>10 &gt; 20 &gt; 60</code>）</div>
+        <div class="k">第三輪</div><div>計算 8 項評分（見下方）</div>
+      </div>
+
+      <h4>📐 評分權重（v4，總分 100+）</h4>
+      <table class="simple">
+        <thead><tr><th>項目</th><th class="num">配分</th><th>說明</th></tr></thead>
+        <tbody>
+          <tr><td>漲幅</td><td class="num">10</td><td>3~5% 滿分；&gt;7% 反而扣分（漲停難進場）</td></tr>
+          <tr><td>量比</td><td class="num">20</td><td>≥3x 滿分</td></tr>
+          <tr><td>法人買超強度</td><td class="num">20</td><td>雙買超 + 合計 ≥50 萬股 滿分</td></tr>
+          <tr><td>乖離率</td><td class="num">20</td><td>0~3% 滿分；&gt;8% 直接 0 分</td></tr>
+          <tr><td>RSI</td><td class="num">10</td><td>60~80 滿分；&gt;80 過熱扣分</td></tr>
+          <tr><td>壓力位</td><td class="num">10</td><td>無明顯壓力滿分</td></tr>
+          <tr><td>位階</td><td class="num">5</td><td>偏低滿分；高位扣分</td></tr>
+          <tr><td>MACD</td><td class="num">10</td><td>黃金交叉 +DIF&gt;0 滿分；空頭排列 0 分</td></tr>
+        </tbody>
+      </table>
+      <p class="note">加減項：籌碼集中度 0~+8、大盤環境 +3~−5、融資增幅 +3~−8</p>
+
+      <h4>🏆 等級門檻</h4>
+      <div class="kv">
+        <div class="k">SS 級</div><div>≥ <code>85</code> 分</div>
+        <div class="k">S 級</div><div>≥ <code>68</code> 分</div>
+        <div class="k">A 級</div><div>≥ <code>52</code> 分</div>
+        <div class="k">淘汰</div><div>&lt; 52 分</div>
+      </div>
+
+      <h4>🎯 進場規則</h4>
+      <div class="kv">
+        <div class="k">一般股</div><div>進場區間 = <code>[close × 0.97, close × 1.00]</code></div>
+        <div class="k"></div><div>T+1 觸到區間 → 成交；沒觸到 → 未進場（不計入賺錢勝率）</div>
+        <div class="k"></div><div>跳空跌破收盤 → 撿便宜成交</div>
+        <div class="k">強勢追漲</div><div>連續 ≥3 日漲停且 5 項條件全過：區間 = <code>[close × 1.00, close × 1.07]</code></div>
+        <div class="k"></div><div>跳空跌破收盤 → <b>不接刀</b>（趨勢反轉訊號）</div>
+        <div class="k">目標 / 停損</div><div><span class="pos">+5%</span> / <span class="pos">+10%</span> / <span class="neg">−5%</span>（基於實際成交價）</div>
+      </div>
+
+      <h4>🚀 強勢追漲 5 項門檻（連續 ≥3 日漲停才檢查）</h4>
+      <ol class="note" style="padding-left:20px">
+        <li>法人合計買超（外資+投信）≥ <b>200K 股</b></li>
+        <li>量比 ≥ <b>2.0x</b></li>
+        <li>籌碼集中度 ≥ <b>10%</b>（法人淨買 / 成交量）</li>
+        <li>MACD：DIF &gt; DEA 且 Histogram 擴張中</li>
+        <li>大盤環境分數 ≥ <b>0</b></li>
+      </ol>
+      <p class="note">5/5 過 → 🚀 強勢追漲；4/5 過 → ⚠️ 觀察名單（不買）；&lt;4 → 跳過</p>
+
+      <h4>📊 結算邏輯</h4>
+      <div class="kv">
+        <div class="k">第一次</div><div>實際進場日 → 下個週五（5 個交易日）</div>
+        <div class="k">第二次</div><div>實際進場日 → 再下個週五（10 個交易日）</div>
+        <div class="k">觸停損</div><div>持有期間 low ≤ 停損價 → settle_pct 強制視為 −5%</div>
+        <div class="k">觸目標</div><div>持有期間 high ≥ 目標 → 記旗標（不影響報酬，讓利潤奔跑）</div>
+        <div class="k">假日</div><div>結算日若為國定假日，自動採用最後可用交易日收盤</div>
+      </div>
+
+      <h4>📈 雙勝率指標</h4>
+      <div class="kv">
+        <div class="k">進場率</div><div><code>filled / (filled + missed)</code></div>
+        <div class="k">賺錢勝率</div><div><code>(filled & settle_pct &gt; 0) / filled</code></div>
+      </div>
+
+      <h4>🔄 自動排程（台灣時間）</h4>
+      <div class="kv">
+        <div class="k">週一~五 17:00</div><div>盤後分析 + T+1 撮合昨日批次</div>
+        <div class="k">週一~五 18~20:00</div><div>17:00 失敗則自動補跑（最多 3 次）</div>
+        <div class="k">週五 18:00</div><div>1 週 + 2 週結算</div>
+        <div class="k">週五 21:00</div><div>選股挑戰結算清零</div>
+      </div>
+    `;
+  }
+
+  // ══════════ 指標教學 ══════════
+  function renderIndicatorsModal(){
+    document.getElementById('indicators-body').innerHTML = `
+      <h4>📊 量比（Volume Ratio）</h4>
+      <p class="note">當日成交量 ÷ 近 5 日平均成交量。&gt;1 表示放量，&gt;1.5 視為明顯放量，&gt;3 為爆量。
+      篩選門檻 1.5x 過濾掉縮量上漲（後繼無力）。</p>
+
+      <h4>📐 乖離率 BIAS（10 日）</h4>
+      <p class="note"><code>(現價 − MA10) / MA10 × 100%</code>。代表股價偏離 10 日均線的程度。
+      &gt;8% = 過熱（追高風險高，回檔機率大）；0~5% = 理想進場區；&lt;0% = 在均線下方，可能在打底。</p>
+
+      <h4>📈 RSI 相對強弱指數（14 日）</h4>
+      <p class="note">用過去 14 日漲跌幅平均比率衡量買賣力道。
+      <b>&gt;80</b> 過熱（短期可能拉回）；<b>60~80</b> 強勢動能（最佳）；
+      <b>50~60</b> 中性偏多；<b>&lt;50</b> 弱勢。</p>
+
+      <h4>📉 MACD 指數平滑移動平均背離</h4>
+      <p class="note">由 <b>DIF = EMA(12) − EMA(26)</b> 與 <b>DEA = EMA(DIF, 9)</b> 構成。
+      Histogram = DIF − DEA 顯示動能強弱。</p>
+      <ul class="note" style="padding-left:20px">
+        <li><b>DIF 上穿 DEA</b>（黃金交叉）→ 多頭轉折訊號</li>
+        <li><b>DIF &gt; DEA + Hist 擴張</b> → 多頭動能加強</li>
+        <li><b>DIF &gt; DEA + Hist 萎縮</b> → 動能轉弱（高點警訊）</li>
+        <li><b>DIF &lt; DEA</b> → 空頭排列</li>
+      </ul>
+
+      <h4>📏 EMA 多頭排列</h4>
+      <p class="note">指數移動平均線。<b>20 &gt; 60 &gt; 120</b> 表示短中長期均線都向上排列，是強多頭趨勢的指標。
+      系統用此作為硬過濾，沒有多頭排列直接淘汰（資料不足 120 天時用備援 10/20/60）。</p>
+
+      <h4>🛡️ ATR 平均真實波幅（14 日）</h4>
+      <p class="note">衡量價格波動率，用於計算「動態停損」。
+      停損 = 進場價 − 2 × ATR，相對固定 −5% 更貼合該股的波動特性。</p>
+
+      <h4>🔋 OBV 能量潮</h4>
+      <p class="note">累積成交量加減：上漲日加上量、下跌日減去量。
+      用來偵測<b>量價背離</b> — 例如價格創新高但 OBV 沒有，可能是假突破。</p>
+
+      <h4>🪙 籌碼集中度</h4>
+      <p class="note"><code>法人淨買超 / 成交量 × 100%</code>。
+      &gt;20% = 主力強力進場；10~20% = 法人積極布局；5~10% = 一般籌碼流入；&lt;5% = 散戶為主。</p>
+
+      <h4>📊 壓力位 / 位階</h4>
+      <p class="note">
+      <b>壓力位</b>：取近 60 日高點為壓力，現價接近壓力時目標難達成（扣分）。<br>
+      <b>位階</b>：現價在近 60 日 high-low 區間的相對位置。&lt;30% 偏低（可能起漲）；&gt;70% 偏高（追高風險）。</p>
+
+      <h4>🚀 連續漲停</h4>
+      <p class="note">日漲幅 ≥ 9.5% 視為漲停（含計算誤差）。
+      連續 ≥3 日漲停會啟動「強勢追漲」流程，需通過 5 項門檻才推薦追進。</p>
+    `;
+  }
+
+  // ══════════ 追蹤清單 ══════════
+  const WATCHLIST_KEY = 'stockbot_watchlist';
+  function loadWatchlist(){
+    try{ return JSON.parse(localStorage.getItem(WATCHLIST_KEY) || '[]') || []; }
+    catch(_){ return []; }
+  }
+  function saveWatchlist(list){
+    localStorage.setItem(WATCHLIST_KEY, JSON.stringify(list));
+  }
+  function addToWatchlist(sid, name){
+    sid = sid.trim().toUpperCase();
+    if(!sid) return false;
+    const list = loadWatchlist();
+    if(list.find(x => x.sid === sid)) return false;
+    list.unshift({sid, name: (name||'').trim(), addedAt: new Date().toISOString().slice(0,10)});
+    saveWatchlist(list);
+    return true;
+  }
+  function removeFromWatchlist(sid){
+    const list = loadWatchlist().filter(x => x.sid !== sid);
+    saveWatchlist(list);
+  }
+
+  function renderWatchlistModal(){
+    const body = document.getElementById('watchlist-body');
+    const list = loadWatchlist();
+    body.innerHTML = `
+      <p class="note">追蹤清單儲存在你瀏覽器本機（localStorage），不會上傳到伺服器。</p>
+      <div style="display:flex;gap:8px;align-items:center;margin:10px 0">
+        <input type="search" id="wl-sid" placeholder="股票代號（例 2330）"
+               style="width:160px;font-size:14px;padding:8px 10px" maxlength="6" autocomplete="off">
+        <input type="text" id="wl-name" placeholder="名稱（選填）"
+               style="flex:1;font-size:14px;padding:8px 10px" maxlength="30">
+        <button class="btn" id="wl-add" style="padding:8px 14px">⭐ 加入</button>
+      </div>
+      <div id="wl-list" style="border:1px solid var(--border);border-radius:8px;overflow:hidden">
+        ${list.length ? list.map(item => `
+          <div class="watchlist-row" data-sid="${item.sid}">
+            <span class="sid" data-action="query">${item.sid}</span>
+            <span class="name">${item.name||''}</span>
+            <span class="added">${item.addedAt}</span>
+            <button data-action="remove">✕ 移除</button>
+          </div>`).join('') : '<div class="placeholder">尚未追蹤任何股票</div>'}
+      </div>
+      <p class="note" style="margin-top:10px">提示：點代號可跳到「個股查詢」直接分析；點 ✕ 移除。</p>
+    `;
+    // 綁事件
+    document.getElementById('wl-add').addEventListener('click', () => {
+      const s = document.getElementById('wl-sid').value;
+      const n = document.getElementById('wl-name').value;
+      if(!/^[0-9A-Z]{2,6}$/i.test(s.trim())){
+        alert('請輸入有效的股票代號（2~6 碼）');
+        return;
+      }
+      if(addToWatchlist(s, n)) renderWatchlistModal();
+      else alert('該代號已在追蹤清單中');
+    });
+    document.getElementById('wl-list').addEventListener('click', (e) => {
+      const row = e.target.closest('.watchlist-row');
+      if(!row) return;
+      const sid = row.dataset.sid;
+      const action = e.target.dataset.action;
+      if(action === 'remove'){
+        removeFromWatchlist(sid);
+        renderWatchlistModal();
+      } else if(action === 'query'){
+        // 切到個股查詢 modal 並自動執行
+        modals.forEach(m => m.hidden = (m.dataset.modalContent !== 'stock'));
+        initStockModal();
+        document.getElementById('stock-input').value = sid;
+        queryStock(false);
+      }
+    });
+    // Enter 鍵也可加入
+    document.getElementById('wl-sid').addEventListener('keydown', e => {
+      if(e.key === 'Enter') document.getElementById('wl-add').click();
+    });
+    document.getElementById('wl-name').addEventListener('keydown', e => {
+      if(e.key === 'Enter') document.getElementById('wl-add').click();
+    });
+  }
 })();
 </script>
 </body>
