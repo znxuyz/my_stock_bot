@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-04 14:50:13",
+  "updated_at": "2026-05-04 14:50:14",
   "summary": {
     "total": 0,
     "filled": null,
@@ -16,5 +16,9 @@
   },
   "by_grade": [],
   "by_bias": [],
-  "by_month": []
+  "by_month": [],
+  "timeline": {
+    "w1": [],
+    "w2": []
+  }
 }
