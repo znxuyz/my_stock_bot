@@ -382,7 +382,7 @@ def build_history_fast(sid, months):
             df_m = fetch_stock_day_fast(sid, yyyymm)
         if not df_m.empty:
             frames.append(df_m)
-        time.sleep(0.5)  # 避免 TWSE 限速
+        time.sleep(0.8)  # 避免 TWSE 限速（0.5 → 0.8 降低每分鐘呼叫頻率到 ~75 次）
 
     if not frames:
         return pd.DataFrame()
@@ -781,7 +781,7 @@ def fetch_margin_change(sid, date_str):
         return None
 
     margin_today = get_margin(date_str)
-    time.sleep(0.3)
+    time.sleep(0.8)  # 融資抓取也加長
     margin_5d    = get_margin(date_5d)
 
     if margin_today is None or margin_5d is None or margin_5d == 0:
@@ -1069,7 +1069,7 @@ def get_period_kbars(sid, start_date, end_date):
         df = _fetch_kbars_with_open(sid, ym)
         if not df.empty:
             frames.append(df)
-        time.sleep(0.5)
+        time.sleep(0.8)  # 結算抓 K 棒也加長，避免和 run_analysis 共同打 TWSE 時被限速
     if not frames:
         return pd.DataFrame()
     full = pd.concat(frames, ignore_index=True).drop_duplicates(subset=['date'])
@@ -1096,7 +1096,7 @@ def fill_pending_t1_entries(today):
         key = (sid, sd)
         if key not in cache:
             cache[key] = get_t1_kbar(sid, sd)
-            time.sleep(0.4)  # 避免 TWSE 限速
+            time.sleep(0.8)  # 避免 TWSE 限速（T+1 撮合也加長）
         kbar = cache[key]
         if kbar is None:
             print(f'[T+1撮合] {sid} {sd} 抓不到 T+1 K 棒，先跳過')
@@ -1456,6 +1456,12 @@ def run_analysis(attempt=0):
         chase_list = []   # 強勢追漲（連續≥3日漲停且通過5項門檻）
         watch_list = []   # 觀察名單（連續≥3日漲停且通過4項門檻）
 
+        # 限速退避：連續 N 檔抓不到 K 棒 → 暫停 60 秒讓 TWSE 恢復
+        # （TWSE 大約每分鐘 60~80 次請求就會限速，180 次/分析很容易中標）
+        RATE_LIMIT_THRESHOLD   = 3
+        RATE_LIMIT_BACKOFF_SEC = 60
+        consec_fails = 0
+
         for idx_c, entry in enumerate(candidates):
             sid = entry['sid']
             try:
@@ -1463,10 +1469,19 @@ def run_analysis(attempt=0):
                 df_hist = build_history_fast(sid, months)
                 elapsed = time.time() - t0
 
-                # 歷史資料不足則跳過
+                # 歷史資料不足則跳過（也可能是 TWSE 限速回空）
                 if df_hist.empty or 'date' not in df_hist.columns or len(df_hist) < 10:
-                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} 歷史資料不足 ✗ {elapsed:.1f}s")
+                    consec_fails += 1
+                    print(f"  [{idx_c+1}/{len(candidates)}] {sid} 歷史資料不足 ✗ {elapsed:.1f}s "
+                          f"(連續失敗 {consec_fails})")
+                    if consec_fails >= RATE_LIMIT_THRESHOLD:
+                        print(f"  [⏸ 限速退避] 連續 {consec_fails} 檔抓不到，暫停 "
+                              f"{RATE_LIMIT_BACKOFF_SEC}s 等 TWSE 恢復...")
+                        time.sleep(RATE_LIMIT_BACKOFF_SEC)
+                        consec_fails = 0   # 退避後重置，繼續嘗試剩下的
                     continue
+                # 抓到資料 → 重置連續失敗計數
+                consec_fails = 0
 
                 # 5. 量比（用歷史資料計算，含當日）
                 vol_ratio = calc_volume_ratio(df_hist, target_date)
