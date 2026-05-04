@@ -76,6 +76,7 @@ def build_payloads():
 
     stats   = _db.get_aggregated_stats()
     summary = _db.get_aggregated_summary()
+    timeline = _db.get_settlement_timeline(limit_settlements=26)
 
     stats_clean = {
         'grade':   [_row_to_dict(r) for r in stats.get('grade',   [])],
@@ -83,6 +84,10 @@ def build_payloads():
         'monthly': [_row_to_dict(r) for r in stats.get('monthly', [])],
     }
     summary_clean = _row_to_dict(summary) if summary else {}
+    timeline_clean = {
+        'w1': [_row_to_dict(r) for r in timeline.get('w1', [])],
+        'w2': [_row_to_dict(r) for r in timeline.get('w2', [])],
+    }
 
     updated_at = _tw_now_iso()
     payloads = {
@@ -98,6 +103,7 @@ def build_payloads():
             'by_grade':   stats_clean['grade'],
             'by_bias':    stats_clean['bias'],
             'by_month':   stats_clean['monthly'],
+            'timeline':   timeline_clean,
         },
         'history.json': {
             'updated_at': updated_at,

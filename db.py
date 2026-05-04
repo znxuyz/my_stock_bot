@@ -673,6 +673,55 @@ def get_aggregated_summary():
         print(f"[DB] get_aggregated_summary 錯誤：{e}")
         return {}
 
+
+def get_settlement_timeline(limit_settlements=26):
+    """
+    依 settle1_date 分組，回傳每次結算的勝率與均報酬時間序列（給折線圖用）
+    最多回傳最近 N 個結算日（預設 26 = 約半年週數）
+    """
+    sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid)
+            settle1_date, settle1_pct, settle1_done,
+            settle2_date, settle2_pct, settle2_done
+        FROM screen_records
+        ORDER BY screen_date, sid, id
+    ),
+    s1 AS (
+        SELECT settle1_date AS sdate,
+               COUNT(*)::int AS total,
+               SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END)::int AS wins,
+               AVG(settle1_pct) AS avg_ret
+        FROM dedup WHERE settle1_done = TRUE
+        GROUP BY settle1_date
+    ),
+    s2 AS (
+        SELECT settle2_date AS sdate,
+               COUNT(*)::int AS total,
+               SUM(CASE WHEN settle2_pct > 0 THEN 1 ELSE 0 END)::int AS wins,
+               AVG(settle2_pct) AS avg_ret
+        FROM dedup WHERE settle2_done = TRUE
+        GROUP BY settle2_date
+    )
+    SELECT 'w1' AS series, sdate, total, wins, avg_ret FROM s1
+    UNION ALL
+    SELECT 'w2' AS series, sdate, total, wins, avg_ret FROM s2
+    ORDER BY sdate
+    """
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(sql)
+                rows = list(cur.fetchall())
+        # 拆成 w1 / w2 兩個陣列，各取最後 N 筆
+        w1 = [r for r in rows if r['series'] == 'w1'][-limit_settlements:]
+        w2 = [r for r in rows if r['series'] == 'w2'][-limit_settlements:]
+        return {'w1': w1, 'w2': w2}
+    except Exception as e:
+        import traceback
+        print(f"[DB] get_settlement_timeline 錯誤：{e}\n{traceback.format_exc()}")
+        return {'w1': [], 'w2': []}
+
 # ══════════════════════════════════════════════════
 # 持倉（guild 隔離）
 # ══════════════════════════════════════════════════
