@@ -113,7 +113,7 @@ def analyze_stock_data(sid):
         r  = sb.safe_get(
             'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
             params={'response': 'csv', 'date': ym + '01', 'stockNo': sid},
-            timeout=15, retries=2, wait=5
+            timeout=20, retries=3, wait=8
         )
         if r and '查詢無資料' not in r.text:
             try:
@@ -151,6 +151,10 @@ def analyze_stock_data(sid):
     df_all = pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
     if len(df_all) < 10:
         return None
+
+    # 最新 K 棒的日期（提示使用者資料截至何時）
+    latest_kbar_date = df_all['date'].iloc[-1].isoformat() if not df_all.empty else None
+    kbar_count       = len(df_all)
 
     # ── 基本數值 ──
     price     = float(df_all['close'].iloc[-1])
@@ -257,6 +261,9 @@ def analyze_stock_data(sid):
         'grade':     grade,
         'grade_emoji': grade_emoji,
         'rec':       rec,
+        'latest_kbar_date': latest_kbar_date,
+        'kbar_count':       kbar_count,
+        'queried_at':       tw_now().strftime('%Y-%m-%d %H:%M:%S'),
     }
 
 
@@ -326,18 +333,21 @@ def analyze_stock(sid):
 # /api/stock 快取（避免重複打 TWSE）
 # ══════════════════════════════════════════════════════
 _STOCK_API_CACHE = {}   # {sid: (timestamp, data)}
-_STOCK_API_CACHE_TTL = 3600  # 1 小時
+_STOCK_API_CACHE_TTL = 900  # 15 分鐘（盤後 TWSE 更新後讓使用者較快拿到當日資料）
 
-def stock_api_get(sid):
-    """帶 1 小時快取的個股查詢，給 /api/stock 用"""
+def stock_api_get(sid, force=False):
+    """個股查詢；force=True 時強制重抓並覆寫快取"""
     now = time.time()
-    if sid in _STOCK_API_CACHE:
+    if not force and sid in _STOCK_API_CACHE:
         ts, data = _STOCK_API_CACHE[sid]
         if now - ts < _STOCK_API_CACHE_TTL:
+            data = dict(data)
+            data['_from_cache'] = True
             return data
     data = analyze_stock_data(sid)
     if data is not None:
         _STOCK_API_CACHE[sid] = (now, data)
+        data['_from_cache'] = False
     return data
 
 
@@ -804,13 +814,14 @@ class InteractionHandler(BaseHTTPRequestHandler):
         u  = urlparse(self.path)
         qs = parse_qs(u.query or '')
 
-        # /api/stock?sid=2330 — 任意股票分析（給 Web Dashboard 用）
+        # /api/stock?sid=2330[&force=1] — 任意股票分析（給 Web Dashboard 用）
         if u.path == '/api/stock':
             sid = (qs.get('sid', [''])[0] or '').strip().upper()
+            force = (qs.get('force', ['0'])[0] or '0').lower() in ('1', 'true', 'yes')
             if not sid or not sid.isalnum() or len(sid) > 6:
                 self.send_json(400, {'ok': False, 'error': '請提供有效的股票代號（最多 6 碼）'}, cors=True)
                 return
-            data = stock_api_get(sid)
+            data = stock_api_get(sid, force=force)
             if data is None:
                 self.send_json(404, {'ok': False, 'error': f'查無 {sid} 資料（代號錯誤或 TWSE 無資料）'}, cors=True)
                 return
