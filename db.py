@@ -105,6 +105,16 @@ def init_db():
         created_at  TIMESTAMP DEFAULT NOW(),
         UNIQUE(guild_id, user_id, week_key)
     );
+    -- 每日分析執行狀態（重啟後仍可知道今日是否已成功跑過）
+    CREATE TABLE IF NOT EXISTS analysis_runs (
+        run_date    DATE PRIMARY KEY,
+        status      VARCHAR(15) NOT NULL,   -- 'running' / 'success' / 'holiday' / 'fail'
+        attempt     INT DEFAULT 0,
+        started_at  TIMESTAMP,
+        finished_at TIMESTAMP,
+        last_error  TEXT,
+        updated_at  TIMESTAMP DEFAULT NOW()
+    );
     """
 
     screen_ddl = """
@@ -236,6 +246,94 @@ def calc_position_pct(grade, bias_pct):
         else:                                  return 0.0
     return 0.0
 
+# ══════════════════════════════════════════════════
+# 每日分析執行狀態（避免 Bot 重啟導致 17:00 重複觸發）
+# ══════════════════════════════════════════════════
+RUN_TIMEOUT_SEC = 1800  # 30 分鐘：若 status='running' 超過此時間視為失敗
+
+def record_run_start(run_date, attempt):
+    """標記分析開始（upsert：保留 run_date 作 primary key）"""
+    sql = """
+    INSERT INTO analysis_runs (run_date, status, attempt, started_at, finished_at, last_error, updated_at)
+    VALUES (%s, 'running', %s, NOW(), NULL, NULL, NOW())
+    ON CONFLICT (run_date) DO UPDATE SET
+        status = 'running',
+        attempt = EXCLUDED.attempt,
+        started_at = NOW(),
+        finished_at = NULL,
+        last_error = NULL,
+        updated_at = NOW()
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (run_date, attempt))
+        conn.commit()
+
+
+def record_run_end(run_date, status, last_error=None):
+    """標記分析結束 ─ status 為 'success' / 'holiday' / 'fail'"""
+    sql = """
+    UPDATE analysis_runs SET
+        status = %s,
+        finished_at = NOW(),
+        last_error = %s,
+        updated_at = NOW()
+    WHERE run_date = %s
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (status, last_error, run_date))
+        conn.commit()
+
+
+def get_run_state(run_date):
+    """
+    回傳 (status, attempt, started_at)，無紀錄回 (None, 0, None)
+    呼叫端可用此判斷是否該觸發 / 重試
+    """
+    sql = "SELECT status, attempt, started_at FROM analysis_runs WHERE run_date = %s"
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (run_date,))
+                row = cur.fetchone()
+                if row is None:
+                    return None, 0, None
+                return row[0], int(row[1] or 0), row[2]
+    except Exception as e:
+        print(f"[DB] get_run_state 錯誤：{e}")
+        return None, 0, None
+
+
+def can_run_today(run_date, now_dt):
+    """
+    依 DB 狀態判斷今天可否觸發新一輪分析。
+    回傳 (can_run: bool, next_attempt: int, reason: str)
+    規則：
+      - 無紀錄 / status='fail'  → 可跑（attempt+1，最多 7 次）
+      - status='success' / 'holiday' → 不跑
+      - status='running'  → 若 started_at 超過 30 分鐘視為當機，可重跑；否則不跑
+    """
+    status, attempt, started_at = get_run_state(run_date)
+    MAX_ATTEMPTS = 7   # 17:00 + 17:30/18:00/18:30/19:00/19:30/20:00 = 最多 7 次
+    if status in ('success', 'holiday'):
+        return False, attempt, f'已 {status}，跳過'
+    if status == 'running':
+        if started_at is None:
+            return False, attempt, 'running（剛啟動）'
+        from datetime import datetime as _dt
+        elapsed = (now_dt - started_at).total_seconds()
+        if elapsed > RUN_TIMEOUT_SEC:
+            # 視為卡死，可重跑（attempt 不變，相同編號）
+            return (attempt < MAX_ATTEMPTS), attempt, f'running 已 {int(elapsed)}s 視為卡死'
+        return False, attempt, f'進行中（{int(elapsed)}s）'
+    # 無紀錄或 fail
+    next_attempt = attempt + 1 if status == 'fail' else 0
+    if next_attempt >= MAX_ATTEMPTS:
+        return False, attempt, f'達最大重試 {MAX_ATTEMPTS}'
+    return True, next_attempt, ('首次' if status is None else f'重試第 {next_attempt} 次')
+
+
 def save_screen_records(records, screen_date, guild_id):
     """
     寫入篩選結果。actual_entry_* 留 NULL，由 fill_t1_entry 在 T+1 後回填。
@@ -243,6 +341,8 @@ def save_screen_records(records, screen_date, guild_id):
       normal:       zone = [close × 0.97, close × 1.00]，fill_status='pending'
       strong_chase: zone = [close × 1.00, close × 1.07]，fill_status='pending'
       watch:        zone = NULL（不會撮合）           ，fill_status='watch'
+
+    冪等：寫入前先 DELETE 同 (screen_date, guild_id) 既存紀錄，避免重試導致重複。
     """
     settle1 = next_friday(screen_date, 1)
     settle2 = next_friday(screen_date, 2)
@@ -286,8 +386,14 @@ def save_screen_records(records, screen_date, guild_id):
        settle1_date, settle2_date)
     VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
     """
+    del_sql = """
+    DELETE FROM screen_records
+    WHERE guild_id = %s AND screen_date = %s
+      AND fill_status = 'pending'  -- 已撮合 / 已結算的不動，只清待撮合的
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
+            cur.execute(del_sql, (guild_id, screen_date))
             cur.executemany(sql, rows)
         conn.commit()
     print(f"[DB] 寫入 {len(rows)} 筆篩選記錄（{screen_date} guild:{guild_id}）")

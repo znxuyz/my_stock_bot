@@ -1074,9 +1074,10 @@ INDICATOR_GUIDE = """
 ━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
-def run_analysis():
+def run_analysis(attempt=0):
     """
     執行盤後分析。
+    參數 attempt：第幾次嘗試（0=首次，1+=重試）。retry 時不再發「啟動中」通知避免洗版。
     回傳 status 字串：
       'success' - 完整跑完、有結果送出
       'holiday' - 該日 TWSE 無資料（國定假日或尚未更新）
@@ -1109,7 +1110,10 @@ def run_analysis():
             except:
                 pass
 
-    _notify_all(f'⏳ 量化分析啟動中（{date_str}），預計 10~20 分鐘後發送結果...')
+    if attempt == 0:
+        _notify_all(f'⏳ 量化分析啟動中（{date_str}），預計 10~20 分鐘後發送結果...')
+    else:
+        print(f'[排程] 第 {attempt} 次重試（不再發 Discord 通知避免洗版）')
     now_tw   = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
 
     if run_mode == 'preview':
