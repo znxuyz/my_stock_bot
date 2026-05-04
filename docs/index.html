@@ -151,6 +151,51 @@
   .watchlist-row button{background:transparent;border:1px solid var(--border);color:var(--muted);
     cursor:pointer;padding:3px 8px;border-radius:4px;font-size:12px}
   .watchlist-row button:hover{color:var(--red);border-color:var(--red)}
+
+  /* ── 手機適配 (≤ 600px) ──────────────────────────── */
+  @media (max-width: 600px){
+    body{font-size:13px}
+    header{flex-direction:column;align-items:flex-start;gap:6px;padding:10px 14px}
+    header h1{font-size:16px;line-height:1.3}
+    header h1 small{display:block;margin-left:0;margin-top:2px;font-size:11px}
+    header > div{display:flex;align-items:center;gap:6px;width:100%;justify-content:space-between}
+    .updated{font-size:11px}
+    .container{padding:12px 10px}
+    .panel{padding:12px}
+    .panel h2{font-size:14px}
+    .tabs{gap:0}
+    .tab{padding:8px 10px;font-size:13px;flex:1;text-align:center;min-width:0}
+    .grid-4{grid-template-columns:repeat(2,1fr)}
+    .grid-3,.grid-2{grid-template-columns:1fr}
+    .stat{padding:12px}
+    .stat .value{font-size:18px}
+    .stat .label{font-size:11px}
+    .stat .sub{font-size:10px}
+    .filter-row{flex-direction:column;align-items:stretch;gap:8px}
+    .filter-row > h2{margin-bottom:4px !important}
+    .filter-row input,.filter-row select{width:100%;font-size:14px}
+    table{font-size:12px}
+    th,td{padding:6px 8px}
+    .scroll{max-height:60vh}
+    .modal{max-height:92vh;border-radius:8px}
+    .modal-header{padding:12px 14px}
+    .modal-header h3{font-size:15px}
+    .modal-body{padding:14px;font-size:13px;line-height:1.6}
+    .modal-body table.simple{font-size:12px}
+    .modal-body .kv{grid-template-columns:1fr;gap:2px 0}
+    .modal-body .kv .k{margin-top:6px;font-weight:600;color:var(--text)}
+    .fab-container{right:16px;bottom:16px;gap:10px}
+    .fab-main{width:52px;height:52px;font-size:22px}
+    .fab-sub{width:44px;height:44px;font-size:18px}
+    .fab-sub .tip{font-size:11px;padding:4px 8px;right:54px}
+    /* 個股查詢結果在手機要更窄 */
+    #stock-result .panel{padding:10px}
+    #stock-form{flex-wrap:wrap}
+    #stock-form input{flex:1 1 100%}
+    #stock-form button{flex:1}
+    /* 折線圖手機版高度減半 */
+    #timeline-chart{height:240px !important}
+  }
 </style>
 </head>
 <body>
@@ -245,6 +290,21 @@
   <!-- 勝率統計 -->
   <section id="tab-stats" class="tab-panel" style="display:none">
     <div class="grid grid-4" id="stats-summary"></div>
+    <div class="panel">
+      <div class="filter-row">
+        <h2 style="margin:0;flex:1">📈 每次結算勝率變化（最近 26 次）</h2>
+        <select id="timeline-series" onchange="renderStats()">
+          <option value="w1" selected>1 週結算</option>
+          <option value="w2">2 週結算</option>
+        </select>
+        <select id="timeline-metric" onchange="renderStats()">
+          <option value="winrate" selected>勝率 %</option>
+          <option value="avgret">均報酬 %</option>
+        </select>
+      </div>
+      <div id="timeline-chart" style="width:100%;height:280px"></div>
+      <p class="updated" id="timeline-empty" style="text-align:center;display:none">尚無結算資料</p>
+    </div>
     <div class="grid grid-2">
       <div class="panel">
         <h2>依等級勝率（進場率 + 賺錢勝率）</h2>
@@ -676,6 +736,114 @@ function renderStats(){
       <td class="num ${clsPct(r.avg_ret)}">${fmtPct(r.avg_ret)}</td>
     </tr>`;
   }).join('') : '<tr><td colspan="5" class="empty">尚無資料</td></tr>';
+
+  // ── Timeline 折線圖 ──
+  renderTimelineChart(data.timeline);
+}
+
+function renderTimelineChart(timeline){
+  const container = document.getElementById('timeline-chart');
+  const emptyMsg  = document.getElementById('timeline-empty');
+  if(!container) return;
+  const seriesKey = (document.getElementById('timeline-series')||{}).value || 'w1';
+  const metric    = (document.getElementById('timeline-metric')||{}).value || 'winrate';
+  const data = (timeline && timeline[seriesKey]) || [];
+  if(!data.length){
+    container.innerHTML = '';
+    if(emptyMsg) emptyMsg.style.display = 'block';
+    return;
+  }
+  if(emptyMsg) emptyMsg.style.display = 'none';
+
+  // 計算每點的 y 值
+  const points = data.map(r => {
+    const wins = Number(r.wins)||0, total = Number(r.total)||0;
+    const wr   = total ? wins/total*100 : 0;
+    const ar   = Number(r.avg_ret)||0;
+    return {
+      date: r.sdate,
+      total, wins,
+      winrate: Math.round(wr*10)/10,
+      avgret:  Math.round(ar*100)/100,
+      y: metric === 'winrate' ? wr : ar,
+    };
+  });
+
+  const W = container.clientWidth || 600;
+  const H = 280;
+  const padL = 44, padR = 16, padT = 16, padB = 48;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+
+  const ys = points.map(p => p.y);
+  let yMin = Math.min(...ys, 0), yMax = Math.max(...ys, metric==='winrate'?100:5);
+  if(metric === 'winrate'){ yMin = 0; yMax = 100; }
+  else {
+    const r = Math.max(Math.abs(yMin), Math.abs(yMax), 2);
+    yMin = -r; yMax = r;  // 對稱讓 0 在中線
+  }
+  const xCount = points.length;
+  const xAt = i => padL + (xCount === 1 ? innerW/2 : i * innerW / (xCount-1));
+  const yAt = v => padT + innerH - ((v - yMin)/(yMax - yMin)) * innerH;
+
+  // Y 軸刻度（4~5 條）
+  const yTicks = [];
+  if(metric === 'winrate'){
+    [0,25,50,75,100].forEach(v => yTicks.push(v));
+  } else {
+    const step = (yMax - yMin) / 4;
+    for(let i = 0; i <= 4; i++) yTicks.push(+(yMin + i*step).toFixed(2));
+  }
+
+  // X 軸日期：太多就只顯示部分
+  const xLabelEvery = Math.max(1, Math.ceil(xCount / 8));
+
+  const lineColor   = metric === 'winrate' ? '#58a6ff' : '#bc8cff';
+  const fillGradId  = 'tlGrad' + Math.random().toString(36).slice(2,8);
+  const baseLine    = metric === 'winrate' ? 50 : 0;
+  const baseY       = yAt(baseLine);
+
+  const linePath = points.map((p,i) => `${i===0?'M':'L'}${xAt(i).toFixed(1)},${yAt(p.y).toFixed(1)}`).join(' ');
+  const fillPath = `${linePath} L${xAt(xCount-1).toFixed(1)},${baseY.toFixed(1)} L${xAt(0).toFixed(1)},${baseY.toFixed(1)} Z`;
+
+  const yGrid = yTicks.map(t => {
+    const y = yAt(t).toFixed(1);
+    return `<line x1="${padL}" y1="${y}" x2="${padL+innerW}" y2="${y}" stroke="#30363d" stroke-width="0.5"/>` +
+           `<text x="${padL-6}" y="${y}" text-anchor="end" dominant-baseline="middle" fill="#8b949e" font-size="10">${t}${metric==='winrate'?'%':''}</text>`;
+  }).join('');
+
+  // 基準線（50% / 0%）粗一點
+  const baseLineEl = `<line x1="${padL}" y1="${baseY}" x2="${padL+innerW}" y2="${baseY}" stroke="#8b949e" stroke-width="1" stroke-dasharray="3,3"/>`;
+
+  const xLabels = points.map((p,i) =>
+    (i % xLabelEvery === 0 || i === xCount-1)
+      ? `<text x="${xAt(i).toFixed(1)}" y="${(padT+innerH+14).toFixed(1)}" text-anchor="middle" fill="#8b949e" font-size="10" transform="rotate(-30 ${xAt(i).toFixed(1)} ${(padT+innerH+14).toFixed(1)})">${(p.date||'').slice(5)}</text>`
+      : '').join('');
+
+  const dots = points.map((p,i) => {
+    const cx = xAt(i).toFixed(1), cy = yAt(p.y).toFixed(1);
+    const isPos = metric==='winrate' ? p.y >= 50 : p.y >= 0;
+    const color = isPos ? '#3fb950' : '#f85149';
+    const tooltip = `${p.date}　${metric==='winrate'?'勝率 '+p.winrate+'%':'均報酬 '+(p.avgret>=0?'+':'')+p.avgret+'%'}　樣本 ${p.total}`;
+    return `<circle cx="${cx}" cy="${cy}" r="3.5" fill="${color}" stroke="#161b22" stroke-width="1.5"><title>${tooltip}</title></circle>`;
+  }).join('');
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="width:100%;height:100%;display:block">
+      <defs>
+        <linearGradient id="${fillGradId}" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stop-color="${lineColor}" stop-opacity="0.25"/>
+          <stop offset="100%" stop-color="${lineColor}" stop-opacity="0"/>
+        </linearGradient>
+      </defs>
+      ${yGrid}
+      ${baseLineEl}
+      <path d="${fillPath}" fill="url(#${fillGradId})"/>
+      <path d="${linePath}" fill="none" stroke="${lineColor}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+      ${dots}
+      ${xLabels}
+    </svg>
+  `;
 }
 
 function renderTopFlow(){
