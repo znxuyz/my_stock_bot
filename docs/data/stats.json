@@ -1,22 +1,62 @@
 {
-  "updated_at": "2026-05-04 17:33:25",
+  "updated_at": "2026-05-04 18:10:55",
   "summary": {
-    "total": 0,
-    "filled": null,
-    "missed": null,
-    "pending": null,
-    "settled1": null,
-    "win1": null,
+    "total": 2,
+    "filled": 0,
+    "missed": 0,
+    "pending": 2,
+    "settled1": 0,
+    "win1": 0,
     "avg_ret1": null,
-    "settled2": null,
-    "win2": null,
+    "settled2": 0,
+    "win2": 0,
     "avg_ret2": null,
     "best_ret1": null,
     "worst_ret1": null
   },
-  "by_grade": [],
-  "by_bias": [],
-  "by_month": [],
+  "by_grade": [
+    {
+      "grade": "A",
+      "total": 2,
+      "filled": 0,
+      "missed": 0,
+      "pending": 2,
+      "settled1": 0,
+      "settled2": 0,
+      "win1": 0,
+      "win2": 0,
+      "avg_ret1": null,
+      "avg_ret2": null,
+      "hit_t1": 0,
+      "hit_t2": 0,
+      "hit_sl": 0
+    }
+  ],
+  "by_bias": [
+    {
+      "bias_zone": "理想(0-5%)",
+      "total": 1,
+      "settled": 0,
+      "win": 0,
+      "avg_ret": null
+    },
+    {
+      "bias_zone": "過高(>8%)",
+      "total": 1,
+      "settled": 0,
+      "win": 0,
+      "avg_ret": null
+    }
+  ],
+  "by_month": [
+    {
+      "ym": "2026-05",
+      "total": 2,
+      "settled": 0,
+      "win": 0,
+      "avg_ret": null
+    }
+  ],
   "timeline": {
     "w1": [],
     "w2": []
