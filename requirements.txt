@@ -1,4 +1,4 @@
-requests
-pandas
-PyNaCl
-psycopg2-binary
+requests>=2.31,<3
+pandas>=2.0,<3
+PyNaCl>=1.5,<2
+psycopg2-binary>=2.9,<3
