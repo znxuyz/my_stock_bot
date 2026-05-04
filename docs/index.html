@@ -359,7 +359,8 @@
         <input type="search" id="stock-input" placeholder="輸入股票代號（例 2330）"
                style="flex:1;font-size:14px;padding:8px 12px"
                maxlength="6" autocomplete="off">
-        <button class="btn" id="stock-search" style="padding:8px 16px">🔍 查詢</button>
+        <button class="btn" id="stock-search" style="padding:8px 16px" title="使用快取查詢">🔍 查詢</button>
+        <button class="btn" id="stock-refresh" style="padding:8px 12px" title="繞過快取，強制重抓最新資料（較慢）">🔄</button>
       </div>
       <div id="stock-result"></div>
       <div id="stock-config" style="margin-top:14px;padding-top:14px;border-top:1px solid var(--border);
@@ -824,12 +825,13 @@ setInterval(loadAll, 5*60*1000);
     else  { localStorage.removeItem(API_KEY); }
     initStockModal();
   });
-  document.getElementById('stock-search').addEventListener('click', queryStock);
+  document.getElementById('stock-search').addEventListener('click', () => queryStock(false));
+  document.getElementById('stock-refresh').addEventListener('click', () => queryStock(true));
   document.getElementById('stock-input').addEventListener('keydown', e => {
-    if(e.key === 'Enter') queryStock();
+    if(e.key === 'Enter') queryStock(false);
   });
 
-  async function queryStock(){
+  async function queryStock(force){
     const sid = document.getElementById('stock-input').value.trim().toUpperCase();
     const out = document.getElementById('stock-result');
     if(!sid){ out.innerHTML = ''; return; }
@@ -842,9 +844,11 @@ setInterval(loadAll, 5*60*1000);
       out.innerHTML = '<div class="placeholder neg">尚未設定 API 網址，請在下方填寫 Bot 的 Public URL</div>';
       return;
     }
-    out.innerHTML = '<div class="placeholder"><div class="icon">⏳</div>查詢中…約需 5~15 秒（首次需抓 6 個月 K 棒）</div>';
+    const hint = force ? '強制重抓中…可能需 10~20 秒' : '查詢中…約需 5~15 秒（首次需抓 6 個月 K 棒）';
+    out.innerHTML = `<div class="placeholder"><div class="icon">⏳</div>${hint}</div>`;
     try{
-      const r = await fetch(`${apiUrl}/api/stock?sid=${encodeURIComponent(sid)}`);
+      const url = `${apiUrl}/api/stock?sid=${encodeURIComponent(sid)}` + (force ? '&force=1' : '');
+      const r = await fetch(url);
       const j = await r.json();
       if(!j.ok){
         out.innerHTML = `<div class="placeholder neg">${j.error || '查詢失敗'}</div>`;
@@ -854,6 +858,25 @@ setInterval(loadAll, 5*60*1000);
     }catch(e){
       out.innerHTML = `<div class="placeholder neg">連線失敗：${e.message}（檢查 API 網址或 Bot 是否在線）</div>`;
     }
+  }
+
+  // 判斷台北時間是否在交易時段（09:00–13:30 平日）
+  function isTwTradingHours(){
+    const utc = new Date();
+    // 台北 = UTC+8
+    const tw = new Date(utc.getTime() + 8*3600*1000);
+    const day = tw.getUTCDay(); // 0=Sun, 6=Sat
+    if(day === 0 || day === 6) return false;
+    const h = tw.getUTCHours(), m = tw.getUTCMinutes();
+    const mins = h*60 + m;
+    return mins >= 9*60 && mins < 13*60+30;
+  }
+  function todayTw(){
+    const tw = new Date(Date.now() + 8*3600*1000);
+    const y = tw.getUTCFullYear();
+    const M = String(tw.getUTCMonth()+1).padStart(2,'0');
+    const D = String(tw.getUTCDate()).padStart(2,'0');
+    return `${y}-${M}-${D}`;
   }
 
   function renderStockCard(d){
@@ -908,14 +931,41 @@ setInterval(loadAll, 5*60*1000);
     if(chip.label && chip.score > 0) advRows.push(['籌碼', chip.label]);
     if(adv.atr_stop)         advRows.push(['動態停損(2×ATR)', `${adv.atr_stop} 元（${adv.atr_pct}%）`]);
 
+    // 資料日期 + 即時性提示
+    const today = todayTw();
+    const dataDate = d.latest_kbar_date || '?';
+    const isStale = dataDate && dataDate !== today;
+    const isIntraday = isTwTradingHours();
+    let freshnessNote = '';
+    if(isStale && isIntraday){
+      freshnessNote = `<div style="background:#d2992233;color:#f0c674;border:1px solid #d2992266;padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:10px">
+        ⏰ 目前為盤中時段，TWSE 當日 K 棒尚未上架。顯示為 <b>${dataDate}</b> 收盤資料。當日資料一般在收盤後 30~90 分鐘可用，可按 🔄 強制重抓。
+      </div>`;
+    } else if(isStale){
+      freshnessNote = `<div style="background:#d2992233;color:#f0c674;border:1px solid #d2992266;padding:8px 12px;border-radius:6px;font-size:12px;margin-bottom:10px">
+        ℹ️ 資料截至 <b>${dataDate}</b>（非當日）。若 TWSE 已更新，可按 🔄 強制重抓。
+      </div>`;
+    }
+    const cacheTag = d._from_cache ? '<span class="pill" style="background:#8b949e33;color:#c9d1d9;font-size:10px;margin-left:6px">📦 快取</span>' : '';
+    const emaWarn  = d.ema_mode === 'fallback'
+      ? `<span class="pill" style="background:#d2992233;color:#f0c674;font-size:10px;margin-left:6px" title="K 棒不足 120 天，改用 10/20/60 EMA 計算（部分月份抓取失敗）">⚠️ 備援 EMA</span>`
+      : '';
+
     return `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-        <h3 style="margin:0">${d.sid}</h3>
+        <div>
+          <h3 style="margin:0;display:inline-block">${d.sid}</h3>
+          ${cacheTag}${emaWarn}
+        </div>
         ${gradeBadge}
       </div>
+      <p style="margin:0 0 10px 0;color:var(--muted);font-size:12px">
+        資料截至：<b>${dataDate}</b>　K 棒筆數：${d.kbar_count}　查詢於：${d.queried_at||''}
+      </p>
+      ${freshnessNote}
       <div class="panel" style="margin-bottom:12px">
         <h4 style="margin:0 0 6px 0">🔹 基本資料</h4>
-        <p style="margin:0">收盤：<b>${d.price}</b>　漲幅：<span class="${chgCls}">${sign}${d.change}%</span>　量比：${d.vol_ratio}x${d.ema_mode==='fallback'?' (備援EMA)':''}</p>
+        <p style="margin:0">收盤：<b>${d.price}</b>　漲幅：<span class="${chgCls}">${sign}${d.change}%</span>　量比：${d.vol_ratio}x</p>
         ${d.foreign!=null?`<p style="margin:4px 0 0 0">外資：<span class="${d.foreign>0?'pos':'neg'}">${fmtSh(d.foreign)}</span> 股　投信：<span class="${d.trust>0?'pos':d.trust<0?'neg':'neu'}">${fmtSh(d.trust)}</span> 股</p>`:''}
         ${bias.bias_pct!=null?`<p style="margin:4px 0 0 0">乖離率（10日）：<span class="${clsPct(bias.bias_pct)}">${bias.bias_pct>=0?'+':''}${bias.bias_pct}%</span> ${bias.bias_emoji||''} ${bias.bias_label||''}</p>`:''}
       </div>
