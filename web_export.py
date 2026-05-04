@@ -152,19 +152,53 @@ def _gh_request(method, path, **kwargs):
     return requests.request(method, f'{GITHUB_API}{path}', headers=headers, timeout=20, **kwargs)
 
 
+def _strip_volatile(obj):
+    """遞迴移除 JSON 中的時間戳欄位（updated_at / queried_at），用於比對是否有實質變動"""
+    if isinstance(obj, dict):
+        return {k: _strip_volatile(v) for k, v in obj.items()
+                if k not in ('updated_at', 'queried_at')}
+    if isinstance(obj, list):
+        return [_strip_volatile(x) for x in obj]
+    return obj
+
+
+def _is_meaningful_change(old_str, new_str):
+    """
+    比對兩份 JSON 是否有實質變動（忽略 updated_at / queried_at）。
+    若無變動回 False（→ 跳過 push 避免觸發 Railway redeploy 迴圈）。
+    """
+    try:
+        old_clean = _strip_volatile(json.loads(old_str))
+        new_clean = _strip_volatile(json.loads(new_str))
+        return old_clean != new_clean
+    except Exception:
+        # 解析失敗時保守視為「有變動」，照樣 push
+        return True
+
+
 def push_file_to_github(repo_path, content_str, commit_msg):
-    """PUT /repos/{owner}/{repo}/contents/{path}"""
+    """PUT /repos/{owner}/{repo}/contents/{path}
+    若 GitHub 上的內容（移除時間戳後）跟本地一致，跳過 push 避免無謂的 commit。
+    """
     if not GITHUB_TOKEN or not GITHUB_REPO:
         return False, 'GITHUB_TOKEN / GITHUB_REPO 未設定，跳過上傳'
 
     api_path = f'/repos/{GITHUB_REPO}/contents/{repo_path}'
     full_url = f'{GITHUB_API}{api_path}'
-    # 先查 sha（更新需要）
+
+    # 先查現有內容，比對 sha 與內容
     sha = None
     try:
         r = _gh_request('GET', api_path, params={'ref': GITHUB_BRANCH})
         if r.status_code == 200:
-            sha = r.json().get('sha')
+            existing = r.json()
+            sha = existing.get('sha')
+            try:
+                existing_content = base64.b64decode(existing.get('content', '')).decode('utf-8')
+                if not _is_meaningful_change(existing_content, content_str):
+                    return True, f'skipped:no-change'
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -217,24 +251,32 @@ def _diag():
 
 
 def push_payloads(payloads):
-    """把所有 payload 推到 GitHub"""
+    """把所有 payload 推到 GitHub。內容無實質變動時自動跳過避免觸發 Railway redeploy。"""
     if not GITHUB_TOKEN or not GITHUB_REPO:
         print('[Web] 略過 GitHub 上傳（未設定 GITHUB_TOKEN/GITHUB_REPO）')
         return False
 
     ts = _tw_now_iso()
-    ok_count = 0
+    upload_count = 0
+    skip_count   = 0
+    fail_count   = 0
     for fname, data in payloads.items():
         content = json.dumps(data, ensure_ascii=False, indent=2, default=_json_default)
         repo_path = f'docs/data/{fname}'
         ok, info = push_file_to_github(repo_path, content,
                                        f'chore(dashboard): update {fname} ({ts})')
         if ok:
-            ok_count += 1
-            print(f'[Web] ✅ 上傳 {repo_path} → {info[:8]}')
+            if str(info).startswith('skipped:'):
+                skip_count += 1
+                print(f'[Web] ⏭️  {repo_path} 內容無變動，跳過 push')
+            else:
+                upload_count += 1
+                print(f'[Web] ✅ 上傳 {repo_path} → {info[:8]}')
         else:
+            fail_count += 1
             print(f'[Web] ❌ 上傳 {repo_path} 失敗：{info}')
-    return ok_count == len(payloads)
+    print(f'[Web] push 總結：上傳 {upload_count} / 跳過 {skip_count} / 失敗 {fail_count}')
+    return fail_count == 0
 
 
 def cache_top_flow(top_flow, screen_date_str=None):

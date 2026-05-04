@@ -1484,9 +1484,15 @@ def scheduler():
     避免 Bot 重啟導致 17:00 重複觸發。
     週五結算 / 挑戰結算仍用記憶體 fired set（每週一次，重複觸發風險低且 idempotent）。
     """
+    SCHEDULER_STARTUP_BUFFER_SEC = 90  # Bot 啟動後 90 秒內不觸發任何排程，避免重啟瞬間落在觸發點再次觸發
+    boot_time = time.time()
     last_check_minute = None   # 同一分鐘內只檢查一次（防 sleep 60 跨秒誤觸）
     fired = set()              # 給週五結算用
     while True:
+        # 啟動緩衝期間只 sleep 不檢查
+        if time.time() - boot_time < SCHEDULER_STARTUP_BUFFER_SEC:
+            time.sleep(10)
+            continue
         now = tw_now()
         h, wd, mn = now.hour, now.weekday(), now.minute
         # 平日且為觸發點（每 30 分鐘）
