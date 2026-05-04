@@ -166,6 +166,46 @@ def get_market_info(date_str):
 #   idx 10 : 投信買賣超股數        ← _trust
 #   idx 18 : 三大法人買賣超股數    ← _total
 # ══════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════
+# T86 共享快取（30 分鐘 TTL）
+# 給 run_analysis / analyze_stock_data / fetch_top_traders 共用
+# 避免同一天多次呼叫各自打 TWSE
+# ══════════════════════════════════════════════════════════
+_T86_CACHE = {}  # date_str -> (timestamp, parsed_df)
+T86_CACHE_TTL_SEC = 1800  # 30 分鐘
+
+def fetch_t86_cached(date_str):
+    """
+    抓 + parse T86 並快取 30 分鐘（給 run_analysis / analyze_stock_data / fetch_top_traders 共用）
+    回傳值：
+      DataFrame（非空）— 成功
+      DataFrame（empty）— 假日 / 查詢無資料
+      None             — 抓取失敗（網路 / 限速）
+    """
+    now = time.time()
+    if date_str in _T86_CACHE:
+        ts, df = _T86_CACHE[date_str]
+        if now - ts < T86_CACHE_TTL_SEC and df is not None:
+            return df
+    r = safe_get(
+        'https://www.twse.com.tw/rwd/zh/fund/T86',
+        params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
+        timeout=30, retries=3, wait=10
+    )
+    if r is None:
+        return None
+    if '查詢無資料' in r.text:
+        # 假日 → 快取空 DataFrame（避免同一天反覆探查）
+        empty = pd.DataFrame()
+        _T86_CACHE[date_str] = (now, empty)
+        return empty
+    df = parse_t86(r.text)
+    # 只快取成功解析的結果；parse 失敗不快取，下次可重試
+    if not df.empty:
+        _T86_CACHE[date_str] = (now, df)
+    return df
+
+
 def parse_t86(text):
     print(f"[T86] 前300字：\n{text[:300]}\n{'─'*40}")
     lines = text.splitlines()
@@ -219,6 +259,16 @@ def parse_t86(text):
 # 歷史 K 棒（單股單月，快速模式）
 # ══════════════════════════════════════════════════════════
 def fetch_stock_day_fast(sid, yyyymm):
+    """
+    抓 STOCK_DAY 月 K 棒。內建 per-month 快取：
+      - 當月（最新）：1 天 refresh（每天會更新到最新交易日）
+      - 歷史月份：30 天 refresh（K 棒不變，極少需要重抓）
+    快取命中時直接回傳，不打 TWSE。
+    """
+    cached = _kbar_cache_get(sid, yyyymm)
+    if cached is not None:
+        return cached
+
     import re as _re
     r = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY',
@@ -268,34 +318,62 @@ def fetch_stock_day_fast(sid, yyyymm):
         df['low']    = pd.to_numeric(df.iloc[:, 5].astype(str).str.replace(',', ''), errors='coerce')
         df['volume'] = pd.to_numeric(df.iloc[:, 1].astype(str).str.replace(',', ''), errors='coerce')
         cols = [c for c in ['date','close','high','low','volume'] if c in df.columns]
-        return df[cols].dropna(subset=['date','close']).reset_index(drop=True)
+        result = df[cols].dropna(subset=['date','close']).reset_index(drop=True)
+        # 寫入快取
+        if not result.empty:
+            _kbar_cache_set(sid, yyyymm, result)
+        return result
     except Exception:
         return pd.DataFrame()
 
+
+# ══════════════════════════════════════════════════════════
+# K 棒智慧快取（per-month per-sid）
+#   - 當月：1 天過期（每天會新增一筆當日 K 棒）
+#   - 歷史月份：30 天過期（資料不會變動）
+# ══════════════════════════════════════════════════════════
+KBAR_CACHE_DIR = '/tmp/stock_kbar_cache_v2'
+
+def _kbar_cache_get(sid, yyyymm):
+    import os, json
+    try:
+        path = f'{KBAR_CACHE_DIR}/{sid}_{yyyymm}.json'
+        if not os.path.exists(path):
+            return None
+        today_yyyymm = (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y%m')
+        is_current = (yyyymm >= today_yyyymm)
+        max_age = 86400 if is_current else 86400 * 30
+        if (time.time() - os.path.getmtime(path)) > max_age:
+            return None
+        with open(path, encoding='utf-8') as f:
+            records = json.load(f)
+        if not records:
+            return None
+        df = pd.DataFrame(records)
+        df['date'] = pd.to_datetime(df['date']).dt.date
+        return df
+    except Exception:
+        return None
+
+
+def _kbar_cache_set(sid, yyyymm, df):
+    import os, json
+    try:
+        os.makedirs(KBAR_CACHE_DIR, exist_ok=True)
+        path = f'{KBAR_CACHE_DIR}/{sid}_{yyyymm}.json'
+        records = df.copy()
+        records['date'] = records['date'].astype(str)
+        with open(path, 'w', encoding='utf-8') as f:
+            json.dump(records.to_dict('records'), f, ensure_ascii=False)
+    except Exception as e:
+        print(f'[KBar 快取] {sid}/{yyyymm} 寫入失敗：{e}')
+
+
 def build_history_fast(sid, months):
     """
-    逐月抓歷史K棒，並快取到磁碟（同一天多次執行直接讀快取，確保結果一致）。
-    快取路徑：/tmp/stock_cache_{date}/{sid}.json
+    逐月抓歷史 K 棒，fetch_stock_day_fast 內部已有 per-month 智慧快取。
+    （快取命中極快，不會打 TWSE）
     """
-    import json, os
-
-    # 快取目錄以月份清單第一個月（=最新月）命名，確保每天獨立
-    cache_dir = f"/tmp/stock_cache_{months[0]}"
-    os.makedirs(cache_dir, exist_ok=True)
-    cache_file = f"{cache_dir}/{sid}.json"
-
-    # 有快取就直接讀，跳過 API 請求
-    if os.path.exists(cache_file):
-        try:
-            with open(cache_file) as f:
-                records = json.load(f)
-            if records:
-                df = pd.DataFrame(records)
-                df['date'] = pd.to_datetime(df['date']).dt.date
-                return df
-        except:
-            pass  # 快取損壞就重新抓
-
     frames = []
     for yyyymm in months:
         df_m = fetch_stock_day_fast(sid, yyyymm)
@@ -310,15 +388,7 @@ def build_history_fast(sid, months):
         return pd.DataFrame()
 
     df_all = pd.concat(frames).drop_duplicates('date').sort_values('date').reset_index(drop=True)
-
-    # 寫入快取
-    try:
-        records = df_all.copy()
-        records['date'] = records['date'].astype(str)
-        with open(cache_file, 'w') as f:
-            json.dump(records.to_dict('records'), f)
-    except:
-        pass
+    return df_all
 
     return df_all
 
@@ -1233,43 +1303,41 @@ def run_analysis(attempt=0):
             return 'success'
 
 
-    r_inst = safe_get(
-        'https://www.twse.com.tw/rwd/zh/fund/T86',
-        params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
-        timeout=40, retries=5, wait=20
-    )
+    # T86 用快取版本（30 分鐘 TTL，避免 run_analysis / API / topbuyer 各自打 TWSE）
+    df_i = fetch_t86_cached(date_str)
     r_price = safe_get(
         'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX',
         params={'response': 'csv', 'date': date_str, 'type': 'ALLBUT0999'},
         timeout=40, retries=5, wait=20
     )
 
-    if r_inst is None or r_price is None:
-        which = 'T86(法人)' if r_inst is None else 'MI_INDEX(價格)'
+    if df_i is None:
         _notify_all(
-            f'❌ 無法取得個股資料（{date_str}）\n'
-            f'失敗來源：{which}\n'
-            f'已重試 5 次，可能是 TWSE 暫時封鎖海外 IP（系統會在 1 小時後自動重試）'
+            f'❌ 無法取得 T86 法人資料（{date_str}）\n'
+            f'已重試多次，可能是 TWSE 暫時封鎖或限速。\n'
+            f'請手動 `/run` 重試（或等明天 17:00 自動排程）。'
         )
         return 'fail'
-    if '查詢無資料' in r_inst.text or '查詢無資料' in r_price.text:
+    if r_price is None:
+        _notify_all(
+            f'❌ 無法取得 MI_INDEX 收盤資料（{date_str}）\n'
+            f'已重試多次，請手動 `/run` 重試。'
+        )
+        return 'fail'
+    if df_i.empty or '查詢無資料' in r_price.text:
         # 國定假日或尚未更新 — 靜默跳過，不騷擾 Discord
         print(f'[假日] {date_str} TWSE 無資料，跳過分析')
         return 'holiday'
 
     try:
-        # ── 解析 T86 ──
-        df_i = parse_t86(r_inst.text)
-        if df_i.empty:
-            _notify_all(f'❌ T86 解析失敗（{date_str}）（將自動重試）')
-            return 'fail'
-
+        # ── T86 已由 fetch_t86_cached 解析完成 ──
         # parse_t86 已用固定索引解析，欄位名稱固定為 _foreign/_trust/_total
         for required_col in ['_foreign', '_trust', '_total']:
             if required_col not in df_i.columns:
                 _notify_all(
                     f'❌ T86 欄位 {required_col} 不存在（{date_str}）\n'
-                    f'現有欄位：{list(df_i.columns)}'
+                    f'現有欄位：{list(df_i.columns)}\n'
+                    f'請手動 `/run` 重試。'
                 )
                 return 'fail'
 
@@ -1280,7 +1348,7 @@ def run_analysis(attempt=0):
 
         # 數據驗證：外資和投信不應同時全為0
         if (df_i['_foreign'] == 0).all() and (df_i['_trust'] == 0).all():
-            _notify_all('❌ T86 法人數據異常（外資+投信全為0）（將自動重試）')
+            _notify_all(f'❌ T86 法人數據異常（{date_str}：外資+投信全為0）請手動 `/run` 重試。')
             return 'fail'
 
         # ── 解析 MI_INDEX ──
@@ -1289,12 +1357,12 @@ def run_analysis(attempt=0):
         if start_idx == -1:
             start_idx = price_text.find('證券代號')
         if start_idx == -1:
-            _notify_all(f'❌ MI_INDEX 找不到表頭（{date_str}）（將自動重試）')
+            _notify_all(f'❌ MI_INDEX 找不到表頭（{date_str}），請手動 `/run` 重試。')
             return 'fail'
 
         df_p = safe_read_csv(price_text[start_idx:], 'MI_INDEX-PRICE', min_cols=5)
         if df_p.empty:
-            _notify_all(f'❌ MI_INDEX 解析失敗（{date_str}）（將自動重試）')
+            _notify_all(f'❌ MI_INDEX 解析失敗（{date_str}），請手動 `/run` 重試。')
             return 'fail'
 
         df_p = df_p.dropna(thresh=5)
@@ -1668,7 +1736,7 @@ def run_analysis(attempt=0):
     except Exception as e:
         import traceback
         print(f"[主程式錯誤]\n{traceback.format_exc()}")
-        _notify_all(f'❌ 系統錯誤：{e}（將在 1 小時後自動重試）')
+        _notify_all(f'❌ 系統錯誤：{e}（請手動 `/run` 重試）')
         return 'fail'
 
 if __name__ == '__main__':

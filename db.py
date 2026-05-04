@@ -309,29 +309,29 @@ def can_run_today(run_date, now_dt):
     """
     依 DB 狀態判斷今天可否觸發新一輪分析。
     回傳 (can_run: bool, next_attempt: int, reason: str)
-    規則：
-      - 無紀錄 / status='fail'  → 可跑（attempt+1，最多 7 次）
+    規則（不自動重試版）：
+      - 無紀錄 → 首次執行（True, attempt=0）
       - status='success' / 'holiday' → 不跑
-      - status='running'  → 若 started_at 超過 30 分鐘視為當機，可重跑；否則不跑
+      - status='fail'   → 不自動重試（請使用者手動 /run）
+      - status='running' 且 started_at 超過 30 分鐘 → 視為卡死，可重跑
+      - status='running' 在時限內 → 不重複觸發
     """
     status, attempt, started_at = get_run_state(run_date)
-    MAX_ATTEMPTS = 7   # 17:00 + 17:30/18:00/18:30/19:00/19:30/20:00 = 最多 7 次
     if status in ('success', 'holiday'):
         return False, attempt, f'已 {status}，跳過'
     if status == 'running':
         if started_at is None:
             return False, attempt, 'running（剛啟動）'
-        from datetime import datetime as _dt
         elapsed = (now_dt - started_at).total_seconds()
         if elapsed > RUN_TIMEOUT_SEC:
-            # 視為卡死，可重跑（attempt 不變，相同編號）
-            return (attempt < MAX_ATTEMPTS), attempt, f'running 已 {int(elapsed)}s 視為卡死'
+            # 卡死才允許重跑
+            return True, attempt, f'running 已 {int(elapsed)}s 視為卡死，重跑'
         return False, attempt, f'進行中（{int(elapsed)}s）'
-    # 無紀錄或 fail
-    next_attempt = attempt + 1 if status == 'fail' else 0
-    if next_attempt >= MAX_ATTEMPTS:
-        return False, attempt, f'達最大重試 {MAX_ATTEMPTS}'
-    return True, next_attempt, ('首次' if status is None else f'重試第 {next_attempt} 次')
+    # 無紀錄
+    if status is None:
+        return True, 0, '首次'
+    # status == 'fail'：不自動重試
+    return False, attempt, '已失敗，不自動重試（請手動 /run）'
 
 
 def save_screen_records(records, screen_date, guild_id):

@@ -164,22 +164,16 @@ def analyze_stock_data(sid):
     vol_ratio = sb.calc_volume_ratio(df_all, df_all['date'].iloc[-1])
     is_bull, ema_mode = sb.check_ema_bull(df_all)
 
-    # ── 法人資料 ──
+    # ── 法人資料（用 sb.fetch_t86_cached 共享 30 分鐘快取，避免和 run_analysis 競爭 TWSE） ──
     foreign = trust = None
     try:
         date_str = sb.get_target_date('auto')
-        r86 = sb.safe_get(
-            'https://www.twse.com.tw/rwd/zh/fund/T86',
-            params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
-            timeout=15, retries=1, wait=5
-        )
-        if r86 and '查詢無資料' not in r86.text:
-            df_i = sb.parse_t86(r86.text)
-            if not df_i.empty and '_foreign' in df_i.columns:
-                row = df_i[df_i['sid_clean'] == sid]
-                if not row.empty:
-                    foreign = int(row['_foreign'].values[0])
-                    trust   = int(row['_trust'].values[0])
+        df_i = sb.fetch_t86_cached(date_str)
+        if df_i is not None and not df_i.empty and '_foreign' in df_i.columns:
+            row = df_i[df_i['sid_clean'] == sid]
+            if not row.empty:
+                foreign = int(row['_foreign'].values[0])
+                trust   = int(row['_trust'].values[0])
     except:
         pass
 
@@ -355,16 +349,10 @@ def stock_api_get(sid, force=False):
 # /topbuyer /topseller
 # ══════════════════════════════════════════════════════
 def fetch_top_traders(top_type='buy', n=10):
+    """用 sb.fetch_t86_cached 共享 30 分鐘快取，避免重複打 TWSE"""
     date_str = sb.get_target_date('auto')
-    r = sb.safe_get(
-        'https://www.twse.com.tw/rwd/zh/fund/T86',
-        params={'response': 'csv', 'date': date_str, 'selectType': 'ALLBUT0999'},
-        timeout=30, retries=3, wait=10
-    )
-    if r is None or '查詢無資料' in r.text:
-        return None, date_str
-    df = sb.parse_t86(r.text)
-    if df.empty or '_foreign' not in df.columns:
+    df = sb.fetch_t86_cached(date_str)
+    if df is None or df.empty or '_foreign' not in df.columns:
         return None, date_str
 
     name_col = df.columns[1]
@@ -1447,8 +1435,8 @@ def settle_challenge():
             _db.clear_challenges(gw['guild_id'], week_key)
     print(f"[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽")
 
-# 17:00 觸發 + 17:30/18:00/18:30/19:00/19:30/20:00 重試（每 30 分鐘）
-ANALYSIS_TRIGGER_TIMES = [(17,0),(17,30),(18,0),(18,30),(19,0),(19,30),(20,0)]
+# 17:00 觸發一次。失敗不自動重試；使用者收到 Discord 通知後手動 /run。
+ANALYSIS_TRIGGER_TIMES = [(17, 0)]
 
 def _run_analysis_with_status(attempt=0):
     """包一層：用 DB 狀態管理避免 Bot 重啟造成的重複觸發"""
