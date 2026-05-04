@@ -1447,50 +1447,70 @@ def settle_challenge():
             _db.clear_challenges(gw['guild_id'], week_key)
     print(f"[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽")
 
-MAX_RETRY_ATTEMPTS = 3   # 17:00 失敗後最多重試次數
-RETRY_HOURS        = [18, 19, 20]  # 重試時間點
+# 17:00 觸發 + 17:30/18:00/18:30/19:00/19:30/20:00 重試（每 30 分鐘）
+ANALYSIS_TRIGGER_TIMES = [(17,0),(17,30),(18,0),(18,30),(19,0),(19,30),(20,0)]
 
 def _run_analysis_with_status(attempt=0):
-    """包一層：跑完更新 last_run.status，方便 scheduler 判斷是否重試"""
+    """包一層：用 DB 狀態管理避免 Bot 重啟造成的重複觸發"""
+    today = tw_now().date()
+    # 標記開始
+    if _DB_OK:
+        try:
+            _db.record_run_start(today, attempt)
+        except Exception as e:
+            print(f'[排程] record_run_start 失敗：{e}')
     try:
-        status = sb.run_analysis()
+        status = sb.run_analysis(attempt=attempt) or 'fail'
     except Exception as e:
         status = 'fail'
         print(f'[排程] run_analysis 例外：{e}')
-    last_run['time']   = tw_now()
-    last_run['date']   = tw_now().date()
-    last_run['mode']   = os.environ.get('RUN_MODE', 'auto')
-    last_run['status'] = status or 'fail'
-    last_run['attempt']= attempt
-    print(f'[排程] run_analysis 結果：status={last_run["status"]} attempt={attempt}')
+    # 標記結束
+    if _DB_OK:
+        try:
+            _db.record_run_end(today, status)
+        except Exception as e:
+            print(f'[排程] record_run_end 失敗：{e}')
+    last_run['time']    = tw_now()
+    last_run['date']    = today
+    last_run['mode']    = os.environ.get('RUN_MODE', 'auto')
+    last_run['status']  = status
+    last_run['attempt'] = attempt
+    print(f'[排程] run_analysis 結果：status={status} attempt={attempt}')
 
 
 def scheduler():
-    fired = set()
+    """
+    每日盤後分析用 DB 狀態（analysis_runs）管理「今日是否已成功跑過」，
+    避免 Bot 重啟導致 17:00 重複觸發。
+    週五結算 / 挑戰結算仍用記憶體 fired set（每週一次，重複觸發風險低且 idempotent）。
+    """
+    last_check_minute = None   # 同一分鐘內只檢查一次（防 sleep 60 跨秒誤觸）
+    fired = set()              # 給週五結算用
     while True:
         now = tw_now()
         h, wd, mn = now.hour, now.weekday(), now.minute
-        # 17:00 第一次嘗試
-        if wd < 5 and h == 17 and mn == 0:
-            k = (now.date(), 'close')
-            if k not in fired:
-                fired.add(k)
-                os.environ['RUN_MODE'] = 'auto'
-                threading.Thread(target=_run_analysis_with_status,
-                                 kwargs={'attempt': 0}, daemon=True).start()
-        # 18/19/20 點：若今日狀態為 fail 才補跑（最多 3 次）
-        if wd < 5 and h in RETRY_HOURS and mn == 0:
-            k_retry = (now.date(), f'retry-{h}')
-            if (k_retry not in fired
-                and last_run.get('date') == now.date()
-                and last_run.get('status') == 'fail'
-                and last_run.get('attempt', 0) < MAX_RETRY_ATTEMPTS):
-                fired.add(k_retry)
-                next_attempt = last_run.get('attempt', 0) + 1
-                print(f'[排程] 17:00 分析失敗，啟動第 {next_attempt} 次重試（{h}:00）')
-                os.environ['RUN_MODE'] = 'auto'
-                threading.Thread(target=_run_analysis_with_status,
-                                 kwargs={'attempt': next_attempt}, daemon=True).start()
+        # 平日且為觸發點（每 30 分鐘）
+        if wd < 5 and (h, mn) in ANALYSIS_TRIGGER_TIMES:
+            check_key = (now.date(), h, mn)
+            if check_key != last_check_minute:
+                last_check_minute = check_key
+                today = now.date()
+                if _DB_OK:
+                    try:
+                        can_run, attempt, reason = _db.can_run_today(today, now)
+                        print(f'[排程] {h:02d}:{mn:02d} can_run={can_run} attempt={attempt} reason={reason}')
+                        if can_run:
+                            os.environ['RUN_MODE'] = 'auto'
+                            threading.Thread(target=_run_analysis_with_status,
+                                             kwargs={'attempt': attempt}, daemon=True).start()
+                    except Exception as e:
+                        print(f'[排程] 檢查狀態失敗：{e}')
+                else:
+                    # DB 失聯時 fallback：第一次觸發直接跑
+                    if (h, mn) == (17, 0):
+                        os.environ['RUN_MODE'] = 'auto'
+                        threading.Thread(target=_run_analysis_with_status,
+                                         kwargs={'attempt': 0}, daemon=True).start()
         # 週五（weekday=4）18:00 自動結算週報（兩次）
         if wd == 4 and h == 18 and mn == 0:
             k = (now.date(), 'weekly_settle')
