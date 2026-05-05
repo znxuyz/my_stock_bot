@@ -2,8 +2,10 @@
 個股相關指令：/stock /topbuyer /topseller。
 共用 analyze_stock_data 給 Web /api/stock 用。
 """
+import logging
 import time
 
+import config
 from advanced_indicators import calc_advanced_indicators
 from chase import check_strong_chase, count_consecutive_limit_ups
 from format_utils import fmt_share
@@ -15,7 +17,7 @@ from time_utils import get_target_date, prev_months, tw_now
 from twse_kbar import build_history_fast, fetch_stock_day_fast
 from twse_t86 import fetch_t86_cached
 
-import config
+logger = logging.getLogger(__name__)
 
 
 # /api/stock 快取
@@ -62,7 +64,7 @@ def analyze_stock_data(sid):
                 foreign = int(row['_foreign'].values[0])
                 trust   = int(row['_trust'].values[0])
     except Exception as e:
-        print(f'[/stock] 取法人資料失敗：{e}')
+        logger.warning('[/stock] 取法人資料失敗：%s', e)
 
     bias = calc_bias_and_entry(df_all, price)
     adv  = calc_advanced_indicators(df_all, price)

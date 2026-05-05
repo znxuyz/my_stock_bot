@@ -35,9 +35,10 @@ def extract_top_flow(df_merged, n=10):
             )
 
     def _to_records(rows):
+        # 注意：底線開頭欄位（_close/_foreign/...）若用 itertuples 會被 pandas 改名。
+        # 改用 to_dict('records') 完整保留欄位名稱。
         out = []
-        for row in rows.itertuples(index=False):
-            row_dict = row._asdict() if hasattr(row, '_asdict') else dict(zip(rows.columns, row))
+        for row_dict in rows.to_dict('records'):
             close = row_dict.get('_close') if close_col else None
             close = float(close) if close is not None and not pd.isna(close) else None
             diff  = row_dict.get('_diff')  if diff_col  else None

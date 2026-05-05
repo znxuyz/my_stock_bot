@@ -1,6 +1,7 @@
 """
 選股挑戰：/challenge 與週五自動結算 settle_challenge。
 """
+import logging
 from datetime import timedelta
 
 import requests
@@ -9,6 +10,8 @@ import config
 import db
 from discord_bot.stock_commands import get_latest_price
 from time_utils import tw_now
+
+logger = logging.getLogger(__name__)
 
 
 def cmd_challenge(uid, uname, sid, guild_id='dm'):
@@ -103,11 +106,11 @@ def settle_challenge():
         try:
             requests.post(webhook, json={'content': '\n'.join(lines)}, timeout=10)
         except Exception as e:
-            print(f'[挑戰結算] webhook 失敗：{e}')
+            logger.warning('[挑戰結算] webhook 失敗：%s', e)
 
     for gw in guilds:
         try:
             db.clear_challenges(gw['guild_id'], week_key)
         except Exception as e:
-            print(f'[挑戰結算] 清空失敗 guild={gw["guild_id"]}：{e}')
-    print(f'[挑戰] 週五結算完成並清零，共 {len(results)} 人參賽')
+            logger.warning('[挑戰結算] 清空失敗 guild=%s：%s', gw["guild_id"], e)
+    logger.info('[挑戰] 週五結算完成並清零，共 %d 人參賽', len(results))

@@ -1,11 +1,14 @@
 """
 大盤資料：MI_INDEX 加權指數、MI_QFIIS 大盤外資買賣超歷史。
 """
+import logging
 from datetime import datetime, timedelta
 
 import pandas as pd
 
 from twse_http import safe_get, safe_read_csv
+
+logger = logging.getLogger(__name__)
 
 
 _MI_INDEX_URL = 'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
@@ -44,7 +47,7 @@ def get_market_info(date_str):
         idx_chg = round((idx_diff / denom) * 100, 2) if denom != 0 else 0
         return {'close': idx_p, 'diff': idx_diff, 'pct': idx_chg}
     except Exception as e:
-        print(f'[大盤解析失敗] {e}')
+        logger.warning('[大盤解析失敗] %s', e)
         return None
 
 
@@ -87,5 +90,5 @@ def fetch_market_foreign_history(date_str, days=3):
             if checked >= days:
                 break
     except Exception as e:
-        print(f'[大盤外資歷史] 抓取失敗：{e}')
+        logger.warning('[大盤外資歷史] 抓取失敗：%s', e)
     return history

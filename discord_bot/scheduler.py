@@ -4,6 +4,7 @@
   - 週五 18:00 兩次結算
   - 週五 21:00 挑戰結算
 """
+import logging
 import threading
 import time
 from datetime import timedelta
@@ -12,9 +13,11 @@ import config
 import db
 from time_utils import tw_now
 
-from discord_bot.handlers import LAST_RUN
+from discord_bot.handlers import update_last_run
 from discord_bot.challenge_commands import settle_challenge
 from discord_bot.settle import settle_weekly
+
+logger = logging.getLogger(__name__)
 
 
 def _run_analysis_with_status(attempt=0, mode='auto'):
@@ -24,24 +27,22 @@ def _run_analysis_with_status(attempt=0, mode='auto'):
     try:
         db.record_run_start(today, attempt)
     except Exception as e:
-        print(f'[排程] record_run_start 失敗：{e}')
+        logger.warning('[排程] record_run_start 失敗：%s', e)
 
     try:
         status = run_analysis(attempt=attempt, run_mode=mode) or 'fail'
     except Exception as e:
         status = 'fail'
-        print(f'[排程] run_analysis 例外：{e}')
+        logger.error('[排程] run_analysis 例外：%s', e)
 
     try:
         db.record_run_end(today, status)
     except Exception as e:
-        print(f'[排程] record_run_end 失敗：{e}')
+        logger.warning('[排程] record_run_end 失敗：%s', e)
 
-    LAST_RUN.update({
-        'time': tw_now(), 'date': today, 'mode': mode,
-        'status': status, 'attempt': attempt,
-    })
-    print(f'[排程] run_analysis 結果：status={status} attempt={attempt}')
+    update_last_run(time=tw_now(), date=today, mode=mode,
+                    status=status, attempt=attempt)
+    logger.info('[排程] run_analysis 結果：status=%s attempt=%d', status, attempt)
 
 
 def scheduler():
@@ -70,7 +71,7 @@ def scheduler():
                 today = now.date()
                 try:
                     can_run, attempt, reason = db.can_run_today(today, now)
-                    print(f'[排程] {h:02d}:{mn:02d} can_run={can_run} attempt={attempt} reason={reason}')
+                    logger.info('[排程] %02d:%02d can_run=%s attempt=%d reason=%s', h, mn, can_run, attempt, reason)
                     if can_run:
                         threading.Thread(
                             target=_run_analysis_with_status,
@@ -78,7 +79,7 @@ def scheduler():
                             daemon=True,
                         ).start()
                 except Exception as e:
-                    print(f'[排程] 檢查狀態失敗：{e}')
+                    logger.error('[排程] 檢查狀態失敗：%s', e)
                     # DB 出問題的 fallback：第一次觸發直接跑
                     if (h, mn) == (17, 0):
                         threading.Thread(
@@ -97,7 +98,7 @@ def scheduler():
                     try:
                         guilds = db.get_all_webhooks()
                     except Exception as e:
-                        print(f'[結算] 取 webhooks 失敗：{e}')
+                        logger.error('[結算] 取 webhooks 失敗：%s', e)
                         guilds = []
                     for gw in guilds:
                         settle_weekly(_d, 1, gw['guild_id'])
@@ -108,7 +109,7 @@ def scheduler():
                         import web_export as _we
                         _we.export_dashboard()
                     except Exception as e:
-                        print(f'[Web] 結算後 Dashboard 匯出失敗：{e}')
+                        logger.error('[Web] 結算後 Dashboard 匯出失敗：%s', e)
 
                 threading.Thread(target=_do_settle, daemon=True).start()
 

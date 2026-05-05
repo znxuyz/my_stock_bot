@@ -2,6 +2,7 @@
 週五 18:00 結算（settle_weekly）。
 從 actual_entry_date ~ settle_date 抓 K 棒，掃 high/low 判斷是否觸 target/stop。
 """
+import logging
 import time
 
 import requests
@@ -9,6 +10,8 @@ import requests
 import config
 import db
 from matching import get_period_kbars
+
+logger = logging.getLogger(__name__)
 
 
 def settle_weekly(settle_date, round_num, guild_id='default'):
@@ -23,7 +26,7 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
 
     records = db.get_pending_settle(settle_date, round_num, guild_id)
     if not records:
-        print(f'[結算] {settle_date} 第{round_num}次：無待結算記錄')
+        logger.info('[結算] %s 第%d次：無待結算記錄', settle_date, round_num)
         return
 
     round_label = f'第{"一" if round_num == 1 else "二"}次結算（{"1週" if round_num == 1 else "2週"}）'
@@ -40,7 +43,7 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
 
         df = get_period_kbars(r['sid'], actual_entry_date, settle_date)
         if df.empty:
-            print(f"[結算] {r['sid']} 抓不到 K 棒，跳過")
+            logger.warning('[結算] %s 抓不到 K 棒，跳過', r['sid'])
             continue
         last_row     = df.iloc[-1]
         settle_close = float(last_row['close'])
@@ -191,12 +194,12 @@ def settle_weekly(settle_date, round_num, guild_id='default'):
     guild_wh = db.get_guild_webhook(guild_id)
     send_wh  = guild_wh or webhook
     if not send_wh:
-        print(f'[結算] guild={guild_id} 無 webhook，僅完成 DB 寫入')
+        logger.info('[結算] guild=%s 無 webhook，僅完成 DB 寫入', guild_id)
         return
     for chunk in chunks:
         try:
             requests.post(send_wh, json={'content': chunk}, timeout=15)
         except Exception as e:
-            print(f'[結算] 發送失敗：{e}')
+            logger.warning('[結算] 發送失敗：%s', e)
         time.sleep(0.5)
-    print(f'[結算] {settle_date} 第{round_num}次結算完成，{len(results)} 筆')
+    logger.info('[結算] %s 第%d次結算完成，%d 筆', settle_date, round_num, len(results))

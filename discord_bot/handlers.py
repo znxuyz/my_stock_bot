@@ -1,6 +1,7 @@
 """
 Discord Interaction HTTP handler。所有 /xxx 指令都從這裡分派。
 """
+import logging
 import json
 import threading
 from http.server import BaseHTTPRequestHandler
@@ -23,11 +24,30 @@ from discord_bot.stock_commands import (
 )
 from discord_bot.verify import verify_signature
 
-# 由 scheduler 寫入。模組層共享，handler 在 /status 讀。
-LAST_RUN = {
+logger = logging.getLogger(__name__)
+
+# scheduler thread 寫、handler thread 讀；用 lock 保護避免 race。
+_LAST_RUN_LOCK = threading.Lock()
+_LAST_RUN = {
     'time': None, 'mode': None, 'date': None,
     'status': None, 'error': None, 'attempt': 0,
 }
+
+
+def update_last_run(**kwargs):
+    """執行緒安全的 update。允許 keys: time / mode / date / status / error / attempt"""
+    with _LAST_RUN_LOCK:
+        _LAST_RUN.update(kwargs)
+
+
+def get_last_run():
+    """執行緒安全的 snapshot。回傳 dict 副本。"""
+    with _LAST_RUN_LOCK:
+        return dict(_LAST_RUN)
+
+
+# 向下相容：保留 LAST_RUN 名稱（dict 直接讀寫的呼叫者），但建議改用 update_last_run / get_last_run
+LAST_RUN = _LAST_RUN
 
 
 def _get_user(body):
@@ -56,7 +76,18 @@ def _patch(token, content):
     try:
         req.patch(_followup_url(token), json={'content': content}, timeout=10)
     except Exception as e:
-        print(f'[Followup] patch 失敗：{e}')
+        logger.warning('[Followup] patch 失敗：%s', e)
+
+
+def _safe_call(fn, *args, fail_msg='❌ 暫時無法處理，稍後再試', **kwargs):
+    """同步指令包裝：DB 未設定 / DB 連線失敗時不讓 handler 崩潰，回傳友善訊息。"""
+    if not db.is_available():
+        return '❌ 資料庫未連接。'
+    try:
+        return fn(*args, **kwargs)
+    except Exception as e:
+        logger.error('[Handler] %s 失敗：%s', fn.__name__, e)
+        return f'{fail_msg}：{e}'
 
 
 class InteractionHandler(BaseHTTPRequestHandler):
@@ -171,17 +202,20 @@ class InteractionHandler(BaseHTTPRequestHandler):
             return True
         if cmd == 'buy':
             sid, price, lots = get_opt(opts, 'code'), get_opt(opts, 'price'), get_opt(opts, 'lots')
-            self.send_json(200, {'type': 4, 'data': {
-                'content': cmd_buy(uid, uname, sid, price, lots, _get_guild(body))}})
+            content = _safe_call(cmd_buy, uid, uname, sid, price, lots, _get_guild(body),
+                                 fail_msg='❌ 記錄失敗')
+            self.send_json(200, {'type': 4, 'data': {'content': content}})
             return True
         if cmd == 'sell':
             sid, price, lots = get_opt(opts, 'code'), get_opt(opts, 'price'), get_opt(opts, 'lots')
-            self.send_json(200, {'type': 4, 'data': {
-                'content': cmd_sell(uid, uname, sid, price, lots, _get_guild(body))}})
+            content = _safe_call(cmd_sell, uid, uname, sid, price, lots, _get_guild(body),
+                                 fail_msg='❌ 記錄失敗')
+            self.send_json(200, {'type': 4, 'data': {'content': content}})
             return True
         if cmd == 'leaderboard':
-            self.send_json(200, {'type': 4, 'data': {
-                'content': cmd_leaderboard(_get_guild(body))}})
+            content = _safe_call(cmd_leaderboard, _get_guild(body),
+                                 fail_msg='❌ 排行榜查詢失敗')
+            self.send_json(200, {'type': 4, 'data': {'content': content}})
             return True
         if cmd == 'poll':
             q  = get_opt(opts, 'question')
@@ -192,16 +226,17 @@ class InteractionHandler(BaseHTTPRequestHandler):
         return False
 
     def _format_status(self):
-        if LAST_RUN['time'] is None:
+        snap = get_last_run()
+        if snap['time'] is None:
             return 'ℹ️ 尚未執行過任何分析。'
-        tw  = LAST_RUN['time'].strftime('%Y/%m/%d %H:%M')
-        emo = {'success': '✅', 'running': '⏳', 'error': '❌'}.get(LAST_RUN['status'], '❓')
+        tw  = snap['time'].strftime('%Y/%m/%d %H:%M')
+        emo = {'success': '✅', 'running': '⏳', 'error': '❌'}.get(snap['status'], '❓')
         ml  = {'auto': '自動判斷', 'close': '盤後結算',
-               'preview': '盤前複習'}.get(LAST_RUN['mode'], '')
+               'preview': '盤前複習'}.get(snap['mode'], '')
         content = (f"{emo} **上次執行紀錄**\n🕐 {tw}（台灣時間）\n📋 {ml}\n"
-                   f"📅 {LAST_RUN['date']}\n📊 {LAST_RUN['status']}")
-        if LAST_RUN['error']:
-            content += f"\n⚠️ {LAST_RUN['error']}"
+                   f"📅 {snap['date']}\n📊 {snap['status']}")
+        if snap['error']:
+            content += f"\n⚠️ {snap['error']}"
         return content
 
     def _handle_holding(self, cmd, opts, body, uid, uname, token):
@@ -250,7 +285,7 @@ class InteractionHandler(BaseHTTPRequestHandler):
             try:
                 db.remove_guild(guild_id)
             except Exception as e:
-                print(f'[setup] remove 失敗：{e}')
+                logger.warning('[setup] remove 失敗：%s', e)
             self.send_json(200, {'type': 4, 'data': {
                 'content': '✅ 已移除本伺服器的推播設定。', 'flags': 64}})
             return True
@@ -320,23 +355,20 @@ class InteractionHandler(BaseHTTPRequestHandler):
         ml   = {'auto': '自動判斷', 'close': '盤後結算',
                 'preview': '盤前複習'}.get(mode, mode)
         _patch(token, f'⏳ 正在執行 **{ml}** 分析，約需 3–5 分鐘...')
-        LAST_RUN.update({
-            'time': tw_now(), 'mode': mode,
-            'date': get_target_date(mode),
-            'status': 'running', 'error': None,
-        })
+        target_date = get_target_date(mode)
+        update_last_run(time=tw_now(), mode=mode, date=target_date,
+                         status='running', error=None)
         try:
             status = run_analysis(run_mode=mode) or 'success'
-            LAST_RUN['status'] = status
+            update_last_run(status=status)
             if status == 'success':
                 _patch(token, f'✅ **{ml}** 分析完成，結果已發送至頻道。')
             elif status == 'holiday':
-                _patch(token, f'ℹ️ {LAST_RUN["date"]} 為國定假日或 TWSE 尚未更新資料，已跳過分析。')
+                _patch(token, f'ℹ️ {target_date} 為國定假日或 TWSE 尚未更新資料，已跳過分析。')
             else:
                 _patch(token, f'❌ 執行失敗（status={status}），請查看 log。')
         except Exception as e:
-            LAST_RUN['status'] = 'error'
-            LAST_RUN['error']  = str(e)
+            update_last_run(status='error', error=str(e))
             _patch(token, f'❌ 執行失敗：{e}')
 
     def _bg_top(self, cmd, token):

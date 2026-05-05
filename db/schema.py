@@ -1,8 +1,11 @@
 """
 init_db：建立所有資料表，必要時 DROP 重建 screen_records（schema 升級）。
 """
+import logging
 import config
 from db.conn import get_conn, get_schema_version, set_schema_version
+
+logger = logging.getLogger(__name__)
 
 
 _OTHER_DDL = """
@@ -116,11 +119,11 @@ def init_db():
             cur.execute(_OTHER_DDL)
             ver = get_schema_version(cur)
             if ver != config.SCHEMA_VERSION:
-                print(f'[DB] screen_records schema 升級：{ver} → {config.SCHEMA_VERSION}（清空舊資料）')
+                logger.warning('[DB] screen_records schema 升級：%s → %s（清空舊資料）', ver, config.SCHEMA_VERSION)
                 cur.execute('DROP TABLE IF EXISTS screen_records')
                 cur.execute(_SCREEN_DDL)
                 set_schema_version(cur, config.SCHEMA_VERSION)
             else:
                 cur.execute(_SCREEN_DDL)
         conn.commit()
-    print(f'[DB] 資料表初始化完成（screen_records {config.SCHEMA_VERSION}）')
+    logger.info('[DB] 資料表初始化完成（screen_records %s）', config.SCHEMA_VERSION)

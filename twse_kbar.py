@@ -1,23 +1,29 @@
 """
 TWSE 個股月 K 棒抓取與本機快取。
-- fetch_stock_day_fast: 收 (date/close/high/low/volume)
-- fetch_kbars_with_open: 收 (date/open/high/low/close/volume)，給 T+1 撮合用
-- build_history_fast: 跨多個月組成完整歷史 K 棒
+
+底層：_fetch_full_kbars(sid, yyyymm) 抓 6 欄完整 K 棒（含 open）並存快取。
+對外：
+  fetch_stock_day_fast  ── 5 欄（不含 open），給歷史指標計算
+  fetch_kbars_with_open ── 6 欄（含 open），給 T+1 撮合 / 結算
+兩者共用同一份快取 → 同一檔同一個月只打 TWSE 一次。
 """
 import json
+import logging
 import os
 import re as _re
 import time
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
 import config
-from twse_http import safe_get, safe_read_csv
 from time_utils import roc_to_date
+from twse_http import safe_get, safe_read_csv
 
+logger = logging.getLogger(__name__)
 
 _STOCK_DAY_URL = 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY'
+_FULL_COLS = ['date', 'open', 'high', 'low', 'close', 'volume']
 
 
 # ─────────── 快取 ───────────
@@ -25,8 +31,8 @@ def _cache_path(sid, yyyymm):
     return f'{config.KBAR_CACHE_DIR}/{sid}_{yyyymm}.json'
 
 
-def _kbar_cache_get(sid, yyyymm):
-    """命中快取回 DataFrame；過期或讀失敗回 None。"""
+def _kbar_cache_get(sid, yyyymm, required_cols=('date', 'close')):
+    """命中快取回 DataFrame；過期、缺欄位、讀失敗回 None。"""
     path = _cache_path(sid, yyyymm)
     if not os.path.exists(path):
         return None
@@ -41,10 +47,13 @@ def _kbar_cache_get(sid, yyyymm):
         if not records:
             return None
         df = pd.DataFrame(records)
+        if not all(c in df.columns for c in required_cols):
+            # 舊快取格式（5 欄缺 open）→ 視為 cache miss 重抓
+            return None
         df['date'] = pd.to_datetime(df['date']).dt.date
         return df
     except Exception as e:
-        print(f'[KBar 快取] {sid}/{yyyymm} 讀取失敗：{e}')
+        logger.warning('[KBar 快取] %s/%s 讀取失敗：%s', sid, yyyymm, e)
         return None
 
 
@@ -57,7 +66,7 @@ def _kbar_cache_set(sid, yyyymm, df):
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(records.to_dict('records'), f, ensure_ascii=False)
     except Exception as e:
-        print(f'[KBar 快取] {sid}/{yyyymm} 寫入失敗：{e}')
+        logger.warning('[KBar 快取] %s/%s 寫入失敗：%s', sid, yyyymm, e)
 
 
 # ─────────── CSV 共用解析 ───────────
@@ -73,10 +82,7 @@ def _locate_header(lines):
 
 
 def _parse_stock_day_csv(text, sid, columns):
-    """
-    columns: 想取的欄位順序，list of str，可包含 'date','open','high','low','close','volume'
-    回傳僅含這些欄位的 DataFrame；資料無效時回 empty。
-    """
+    """columns: 'date'/'open'/'high'/'low'/'close'/'volume' 子集；資料無效回 empty。"""
     lines = text.splitlines()
     header_i = _locate_header(lines)
     if header_i is None:
@@ -101,10 +107,12 @@ def _parse_stock_day_csv(text, sid, columns):
     return df[out_cols].dropna(subset=['date', 'close']).reset_index(drop=True)
 
 
-# ─────────── 對外 API ───────────
-def fetch_stock_day_fast(sid, yyyymm):
-    """抓 sid 的 yyyymm 月 K 棒（不含 open）。內建本機快取。"""
-    cached = _kbar_cache_get(sid, yyyymm)
+def _fetch_full_kbars(sid, yyyymm):
+    """
+    抓並快取 6 欄完整 K 棒（date / open / high / low / close / volume）。
+    所有對外 fetcher 都走這個底層 → 同一檔同一個月只打 TWSE 一次。
+    """
+    cached = _kbar_cache_get(sid, yyyymm, required_cols=_FULL_COLS)
     if cached is not None:
         return cached
     r = safe_get(
@@ -114,22 +122,25 @@ def fetch_stock_day_fast(sid, yyyymm):
     )
     if r is None or '查詢無資料' in r.text:
         return pd.DataFrame()
-    df = _parse_stock_day_csv(r.text, sid, ['date', 'close', 'high', 'low', 'volume'])
+    df = _parse_stock_day_csv(r.text, sid, _FULL_COLS)
     if not df.empty:
         _kbar_cache_set(sid, yyyymm, df)
     return df
 
 
+# ─────────── 對外 API ───────────
+def fetch_stock_day_fast(sid, yyyymm):
+    """5 欄 K 棒（無 open），給歷史指標計算。"""
+    df = _fetch_full_kbars(sid, yyyymm)
+    if df.empty:
+        return df
+    cols = [c for c in ['date', 'close', 'high', 'low', 'volume'] if c in df.columns]
+    return df[cols].copy()
+
+
 def fetch_kbars_with_open(sid, yyyymm):
-    """抓 sid 的 yyyymm 月 K 棒（含 open）。給 T+1 撮合 / 結算用。"""
-    r = safe_get(
-        _STOCK_DAY_URL,
-        params={'response': 'csv', 'date': yyyymm + '01', 'stockNo': sid},
-        timeout=15, retries=2, wait=8,
-    )
-    if r is None or '查詢無資料' in r.text:
-        return pd.DataFrame()
-    return _parse_stock_day_csv(r.text, sid, ['date', 'open', 'high', 'low', 'close', 'volume'])
+    """6 欄 K 棒（含 open），給 T+1 撮合 / 結算用。"""
+    return _fetch_full_kbars(sid, yyyymm)
 
 
 def build_history_fast(sid, months):

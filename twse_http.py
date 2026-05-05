@@ -2,6 +2,7 @@
 TWSE HTTP 抓資料的共用工具：safe_get / CSV 解析 / 欄位查找。
 """
 import io
+import logging
 import time
 
 import pandas as pd
@@ -9,6 +10,8 @@ import requests
 import urllib3
 
 import config
+
+logger = logging.getLogger(__name__)
 
 # Note: TWSE 偶爾出現 SSL 憑證錯誤，預設關閉驗證；可用 TWSE_VERIFY_SSL=1 強制開啟。
 if not config.TWSE_VERIFY_SSL:
@@ -31,14 +34,14 @@ def safe_get(url, params=None, timeout=25, retries=3, wait=15):
             return r
         except requests.exceptions.Timeout as e:
             last_exc = e
-            print(f'[逾時] {url}（第{attempt}次）')
+            logger.warning('[逾時] %s（第%d次）', url, attempt)
         except requests.exceptions.RequestException as e:
             last_exc = e
-            print(f'[失敗] {url}（第{attempt}次）：{e}')
+            logger.warning('[失敗] %s（第%d次）：%s', url, attempt, e)
         if attempt < retries:
             time.sleep(wait)
     if last_exc:
-        print(f'[safe_get] 最終放棄：{url}')
+        logger.error('[safe_get] 最終放棄：%s', url)
     return None
 
 
@@ -50,10 +53,10 @@ def safe_read_csv(text, label, skiprows=0, thousands=',', min_cols=2):
             thousands=thousands, on_bad_lines='skip',
         )
     except Exception as e:
-        print(f'[{label}] 解析失敗：{e}\n前400字：\n{text[:400]}')
+        logger.warning('[%s] 解析失敗：%s\n前400字：\n%s', label, e, text[:400])
         return pd.DataFrame()
     if df.shape[1] < min_cols:
-        print(f'[{label}] 欄位不足({df.shape[1]})，前400字：\n{text[:400]}')
+        logger.warning('[%s] 欄位不足(%d)，前400字：\n%s', label, df.shape[1], text[:400])
         return pd.DataFrame()
     return df
 

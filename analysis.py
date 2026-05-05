@@ -2,6 +2,7 @@
 盤後分析主流程 run_analysis。
 從 stock_bot.py 抽出，移除原本的死碼（market_env suspend 後的整段重複程式）。
 """
+import logging
 import os
 import time
 import traceback
@@ -14,6 +15,7 @@ import config
 import db
 from advanced_indicators import calc_advanced_indicators
 from chase import check_strong_chase, count_consecutive_limit_ups
+from format_utils import fmt_share_signed as fmt_share
 from indicators import (
     calc_bias_and_entry, calc_macd, calc_volume_ratio, check_ema_bull,
 )
@@ -21,12 +23,13 @@ from matching import fill_pending_t1_entries
 from scoring import calc_chip_concentration, calc_market_env, calc_score
 from time_utils import get_target_date, prev_months, tw_now
 from topflow import extract_top_flow
-from twse_http import safe_get, safe_read_csv, clean_sid
+from twse_http import clean_sid, safe_get, safe_read_csv
 from twse_kbar import build_history_fast
 from twse_margin import fetch_margin_change
 from twse_market import fetch_market_foreign_history, get_market_info
 from twse_t86 import fetch_t86_cached
-from format_utils import fmt_share_signed as fmt_share
+
+logger = logging.getLogger(__name__)
 
 
 _MI_INDEX_PRICE_URL = 'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
@@ -64,7 +67,7 @@ def _get_all_webhooks():
             if gw['webhook_url'] and gw['webhook_url'] not in whs:
                 whs.append(gw['webhook_url'])
     except Exception as e:
-        print(f'[Webhook 收集] 失敗：{e}')
+        logger.warning('[Webhook 收集] 失敗：%s', e)
     return whs
 
 
@@ -73,7 +76,7 @@ def _notify_all(msg):
         try:
             requests.post(wh, json={'username': '川投顧量化系統', 'content': msg}, timeout=10)
         except Exception as e:
-            print(f'[Webhook 推送] 失敗：{e}')
+            logger.warning('[Webhook 推送] 失敗：%s', e)
 
 
 def _to_native(v):
@@ -133,7 +136,7 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
                 'total': int(total),
             })
         except Exception as e:
-            print(f'[第一輪] 處理列失敗：{e}')
+            logger.warning('[第一輪] 處理列失敗：%s', e)
     return candidates
 
 
@@ -164,7 +167,7 @@ def _enrich_candidate(entry, df_hist, target_date, market_env, date_str):
     except Exception as e:
         entry['margin_score'] = 0
         entry['margin_label'] = ''
-        print(f'[融資] {sid} 失敗：{e}')
+        logger.warning('[融資] %s 失敗：%s', sid, e)
 
     macd_info = calc_macd(df_hist)
     entry['macd_score'] = macd_info['macd_score']
@@ -290,7 +293,7 @@ def _send_message(message):
                     timeout=15,
                 )
             except Exception as e:
-                print(f'[Webhook 發送] 失敗：{e}')
+                logger.warning('[Webhook 發送] 失敗：%s', e)
             if i < len(chunks) - 1:
                 time.sleep(0.5)
         time.sleep(1)
@@ -303,7 +306,7 @@ def run_analysis(attempt=0, run_mode=None):
     run_mode 沒指定時讀 RUN_MODE 環境變數（向下相容）；建議呼叫端直接傳。
     """
     if not config.DISCORD_WEBHOOK and not config.DATABASE_URL:
-        print('[錯誤] 未設定 DISCORD_WEBHOOK 且資料庫未連線，無法發送')
+        logger.error('[錯誤] 未設定 DISCORD_WEBHOOK 且資料庫未連線，無法發送')
         return 'fail'
 
     if run_mode is None:
@@ -313,7 +316,7 @@ def run_analysis(attempt=0, run_mode=None):
     if attempt == 0:
         _notify_all(f'⏳ 量化分析啟動中（{date_str}），預計 10~20 分鐘後發送結果...')
     else:
-        print(f'[排程] 第 {attempt} 次重試（不再發 Discord 通知避免洗版）')
+        logger.info('[排程] 第 %d 次重試（不再發 Discord 通知避免洗版）', attempt)
 
     now_tw = tw_now()
     if run_mode == 'preview':
@@ -323,7 +326,8 @@ def run_analysis(attempt=0, run_mode=None):
     else:
         report_type = '盤後結算' if now_tw.hour >= config.DATA_READY_HOUR else '盤前複習'
 
-    print(f"[執行] 模式={run_mode}，日期={date_str}，台灣時間={now_tw.strftime('%H:%M')}")
+    logger.info('[執行] 模式=%s，日期=%s，台灣時間=%s',
+                run_mode, date_str, now_tw.strftime('%H:%M'))
     t_start = time.time()
 
     market = get_market_info(date_str)
@@ -352,7 +356,7 @@ def run_analysis(attempt=0, run_mode=None):
         _notify_all(f'❌ 無法取得 MI_INDEX 收盤資料（{date_str}）\n已重試多次，請手動 `/run` 重試。')
         return 'fail'
     if df_i.empty or '查詢無資料' in r_price.text:
-        print(f'[假日] {date_str} TWSE 無資料，跳過分析')
+        logger.info('[假日] %s TWSE 無資料，跳過分析', date_str)
         return 'holiday'
 
     try:
@@ -382,17 +386,18 @@ def run_analysis(attempt=0, run_mode=None):
             return 'fail'
         df_p = df_p.dropna(thresh=5)
         df_p['sid_clean'] = clean_sid(df_p.iloc[:, 0])
-        print(f'[MI_INDEX] {len(df_p)} 檔')
+        logger.info('[MI_INDEX] %d 檔', len(df_p))
 
         df = pd.merge(df_i, df_p, on='sid_clean', how='inner')
-        print(f'[合併] {len(df)} 檔')
+        logger.info('[合併] %d 檔', len(df))
 
         try:
             top_flow_data = extract_top_flow(df, n=10)
-            print(f"[外資榜] 買超 {len(top_flow_data['buyers'])} / 賣超 {len(top_flow_data['sellers'])}")
+            logger.info('[外資榜] 買超 %d / 賣超 %d',
+                        len(top_flow_data['buyers']), len(top_flow_data['sellers']))
         except Exception as e:
             top_flow_data = None
-            print(f'[外資榜] 失敗：{e}')
+            logger.warning('[外資榜] 失敗：%s', e)
 
         col_close = next((c for c in df.columns if '收盤' in str(c)), None)
         col_diff  = next((c for c in df.columns
@@ -405,16 +410,16 @@ def run_analysis(attempt=0, run_mode=None):
 
         # 第一輪
         candidates = _filter_first_round(df, df_i, col_close, col_diff, col_sign)
-        print(f'[過濾1] 基本條件通過：{len(candidates)} 檔')
+        logger.info('[過濾1] 基本條件通過：%d 檔', len(candidates))
         if len(candidates) > config.MAX_CANDIDATES:
             candidates.sort(key=lambda e: e['total'], reverse=True)
             candidates = candidates[:config.MAX_CANDIDATES]
-            print(f'[過濾4] 截斷至前 {config.MAX_CANDIDATES} 名（依法人買超）')
+            logger.info('[過濾4] 截斷至前 %d 名（依法人買超）', config.MAX_CANDIDATES)
 
         # 第二輪：量比 + EMA + 進階指標 + 評分
         months      = prev_months(date_str, n=7)
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
-        print(f'[EMA] 月份清單：{months}')
+        logger.info('[EMA] 月份清單：%s', months)
 
         ss_list, s_list, a_list = [], [], []
         chase_list, watch_list = [], []
@@ -429,11 +434,11 @@ def run_analysis(attempt=0, run_mode=None):
 
                 if df_hist.empty or 'date' not in df_hist.columns or len(df_hist) < 10:
                     consec_fails += 1
-                    print(f'  [{idx_c + 1}/{len(candidates)}] {sid} 歷史資料不足 ✗ '
-                          f'{elapsed:.1f}s (連續失敗 {consec_fails})')
+                    logger.info('  [%d/%d] %s 歷史資料不足 ✗ %.1fs (連續失敗 %d)',
+                                idx_c + 1, len(candidates), sid, elapsed, consec_fails)
                     if consec_fails >= config.RATE_LIMIT_THRESHOLD:
-                        print(f'  [⏸ 限速退避] 連續 {consec_fails} 檔抓不到，暫停 '
-                              f'{config.RATE_LIMIT_BACKOFF_SEC}s 等 TWSE 恢復...')
+                        logger.warning('  [⏸ 限速退避] 連續 %d 檔抓不到，暫停 %ds 等 TWSE 恢復...',
+                                       consec_fails, config.RATE_LIMIT_BACKOFF_SEC)
                         time.sleep(config.RATE_LIMIT_BACKOFF_SEC)
                         consec_fails = 0
                     continue
@@ -441,12 +446,12 @@ def run_analysis(attempt=0, run_mode=None):
 
                 vol_ratio = calc_volume_ratio(df_hist, target_date)
                 if vol_ratio < config.VOLUME_RATIO_MIN:
-                    print(f'  [{idx_c + 1}/{len(candidates)}] {sid} 量比{vol_ratio:.2f} ✗ {elapsed:.1f}s')
+                    logger.info('  [%d/%d] %s 量比%.2f ✗ %.1fs', idx_c + 1, len(candidates), sid, vol_ratio, elapsed)
                     continue
 
                 is_bull, ema_mode = check_ema_bull(df_hist)
                 if not is_bull:
-                    print(f'  [{idx_c + 1}/{len(candidates)}] {sid} EMA{ema_mode} ✗ {elapsed:.1f}s')
+                    logger.info('  [%d/%d] %s EMA%s ✗ %.1fs', idx_c + 1, len(candidates), sid, ema_mode, elapsed)
                     continue
                 entry['vol_ratio'] = vol_ratio
                 entry['ema_mode']  = ema_mode
@@ -456,15 +461,15 @@ def run_analysis(attempt=0, run_mode=None):
                 if entry['chase_mode'] == 'reject':
                     consec = entry.get('consec_limit_up', 0)
                     passed = entry.get('chase_check', {}).get('passed', 0)
-                    print(f'  [{idx_c + 1}/{len(candidates)}] {sid} 連續{consec}日漲停但只過{passed}/5 項 ✗')
+                    logger.info('  [%d/%d] %s 連續%d日漲停但只過%d/5 項 ✗', idx_c + 1, len(candidates), sid, consec, passed)
                     continue
 
                 _classify(entry, ss_list, s_list, a_list, chase_list, watch_list)
-                print(f"  [{idx_c + 1}/{len(candidates)}] {sid} {entry['name']} ✓ "
-                      f"漲{entry['change']}% 量比{vol_ratio:.2f} EMA:{ema_mode} "
-                      f"mode:{entry['chase_mode']} {elapsed:.1f}s")
+                logger.info("  [%d/%d] %s %s ✓ 漲%s%% 量比%.2f EMA:%s mode:%s %.1fs",
+                                idx_c + 1, len(candidates), sid, entry['name'],
+                                entry['change'], vol_ratio, ema_mode, entry['chase_mode'], elapsed)
             except Exception as e:
-                print(f'  [{idx_c + 1}/{len(candidates)}] {sid} 錯誤：{e}')
+                logger.warning('  [%d/%d] %s 錯誤：%s', idx_c + 1, len(candidates), sid, e)
 
         for lst in (ss_list, s_list, a_list, chase_list, watch_list):
             lst.sort(key=lambda e: e.get('score', 0), reverse=True)
@@ -490,27 +495,27 @@ def run_analysis(attempt=0, run_mode=None):
                     try:
                         db.save_screen_records(cleaned, sd, gw['guild_id'])
                     except Exception as ge:
-                        print(f"[DB] guild {gw['guild_id']} 寫入失敗：{ge}")
-                print(f'[DB] 儲存 {len(cleaned)} 筆至 {len(guilds)} 個伺服器')
+                        logger.error('[DB] guild %s 寫入失敗：%s', gw['guild_id'], ge)
+                logger.info('[DB] 儲存 %d 筆至 %d 個伺服器', len(cleaned), len(guilds))
         except Exception as e:
-            print(f'[DB] 寫入失敗：{e}')
+            logger.error('[DB] 寫入失敗：%s', e)
 
         # T+1 撮合
         try:
             today = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
             fill_pending_t1_entries(today)
         except Exception as e:
-            print(f'[T+1撮合] 失敗：{e}')
+            logger.error('[T+1撮合] 失敗：%s', e)
 
         # 匯出 dashboard
         try:
             import web_export as _we
             _we.export_dashboard(top_flow=top_flow_data, screen_date_str=date_str)
         except Exception as e:
-            print(f'[Web] Dashboard 匯出失敗：{e}')
+            logger.error('[Web] Dashboard 匯出失敗：%s', e)
 
         total_elapsed = time.time() - t_start
-        print(f'[完成] SS={len(ss_list)} S={len(s_list)} A={len(a_list)}，總耗時={total_elapsed:.0f}秒')
+        logger.info('[完成] SS=%d S=%d A=%d，總耗時=%.0f秒', len(ss_list), len(s_list), len(a_list), total_elapsed)
 
         # ── 組裝 Discord 訊息 ──
         if market:
@@ -548,10 +553,12 @@ def run_analysis(attempt=0, run_mode=None):
         return 'success'
 
     except Exception as e:
-        print(f'[主程式錯誤]\n{traceback.format_exc()}')
+        logger.error('[主程式錯誤]\n%s', traceback.format_exc())
         _notify_all(f'❌ 系統錯誤：{e}（請手動 `/run` 重試）')
         return 'fail'
 
 
 if __name__ == '__main__':
+    from logging_setup import setup_logging
+    setup_logging()
     run_analysis()

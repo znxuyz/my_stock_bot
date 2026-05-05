@@ -1,6 +1,7 @@
 """
 T+1 撮合：把 fill_status='pending' 的紀錄用其 T+1 K 棒判定進場結果。
 """
+import logging
 import time
 from datetime import timedelta
 
@@ -9,6 +10,8 @@ import pandas as pd
 import config
 import db
 from twse_kbar import fetch_kbars_with_open
+
+logger = logging.getLogger(__name__)
 
 
 def get_t1_kbar(sid, screen_date):
@@ -61,7 +64,7 @@ def fill_pending_t1_entries(today):
     """
     pendings = db.get_records_needing_t1_check(today)
     if not pendings:
-        print('[T+1撮合] 無待撮合紀錄')
+        logger.info('[T+1撮合] 無待撮合紀錄')
         return
 
     cache = {}
@@ -74,7 +77,7 @@ def fill_pending_t1_entries(today):
             time.sleep(config.TWSE_CALL_INTERVAL_SEC)
         kbar = cache[key]
         if kbar is None:
-            print(f'[T+1撮合] {sid} {sd} 抓不到 T+1 K 棒，先跳過')
+            logger.warning('[T+1撮合] %s %s 抓不到 T+1 K 棒，先跳過', sid, sd)
             continue
 
         # 強勢追漲不接刀：跳空跌破收盤就算 missed
@@ -89,7 +92,7 @@ def fill_pending_t1_entries(today):
             db.fill_t1_entry(r['id'], kbar['date'], status, fill_price)
             tag = '✅成交' if status == 'filled' else '❌未進場'
             fp  = f'@{fill_price}' if fill_price else ''
-            print(f'[T+1撮合] {sid} {sd} → {kbar["date"]} {tag} {fp}')
+            logger.info('[T+1撮合] %s %s → %s %s %s', sid, sd, kbar['date'], tag, fp)
         except Exception as e:
-            print(f'[T+1撮合] {sid} 寫入失敗：{e}')
-    print(f'[T+1撮合] 完成，處理 {len(pendings)} 筆')
+            logger.error('[T+1撮合] %s 寫入失敗：%s', sid, e)
+    logger.info('[T+1撮合] 完成，處理 %d 筆', len(pendings))

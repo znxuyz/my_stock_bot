@@ -2,10 +2,13 @@
 screen_records：篩選結果寫入、依日期/歷史查詢。
 T+1 撮合與結算寫入請看 db.settle。
 """
+import logging
 from psycopg2.extras import RealDictCursor
 
 from db.conn import get_conn
 from db.settle import calc_position_pct, next_friday
+
+logger = logging.getLogger(__name__)
 
 
 def save_screen_records(records, screen_date, guild_id):
@@ -64,7 +67,7 @@ def save_screen_records(records, screen_date, guild_id):
             cur.execute(del_sql, (guild_id, screen_date))
             cur.executemany(sql, rows)
         conn.commit()
-    print(f'[DB] 寫入 {len(rows)} 筆篩選記錄（{screen_date} guild:{guild_id}）')
+    logger.info('[DB] 寫入 %d 筆篩選記錄（%s guild:%s）', len(rows), screen_date, guild_id)
 
 
 def get_records_needing_t1_check(before_date):

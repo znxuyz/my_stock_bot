@@ -1,8 +1,11 @@
 """
 analysis_runs：每日分析執行狀態，避免 Bot 重啟導致 17:00 重複觸發。
 """
+import logging
 import config
 from db.conn import get_conn
+
+logger = logging.getLogger(__name__)
 
 
 def record_run_start(run_date, attempt):
@@ -49,7 +52,7 @@ def get_run_state(run_date):
                     return None, 0, None
                 return row[0], int(row[1] or 0), row[2]
     except Exception as e:
-        print(f'[DB] get_run_state 錯誤：{e}')
+        logger.error('[DB] get_run_state 錯誤：%s', e)
         return None, 0, None
 
 

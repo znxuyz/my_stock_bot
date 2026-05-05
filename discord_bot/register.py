@@ -1,9 +1,12 @@
 """
 向 Discord 註冊 slash commands。每次 Bot 啟動會跑一次。
 """
+import logging
 import requests
 
 import config
+
+logger = logging.getLogger(__name__)
 
 
 _COMMANDS = [
@@ -58,7 +61,7 @@ _COMMANDS = [
 
 def register_commands():
     if not (config.DISCORD_BOT_TOKEN and config.DISCORD_APP_ID):
-        print('[Bot] 缺少 DISCORD_BOT_TOKEN 或 DISCORD_APP_ID，跳過註冊指令')
+        logger.warning('[Bot] 缺少 DISCORD_BOT_TOKEN 或 DISCORD_APP_ID，跳過註冊指令')
         return
     url = f'https://discord.com/api/v10/applications/{config.DISCORD_APP_ID}/commands'
     headers = {
@@ -68,6 +71,6 @@ def register_commands():
     try:
         r = requests.put(url, headers=headers, json=_COMMANDS, timeout=10)
         ok = r.status_code in (200, 201)
-        print(f'[Bot] Slash Commands 註冊{"成功" if ok else f"失敗：{r.status_code}"}')
+        logger.info('[Bot] Slash Commands 註冊%s', '成功' if ok else f'失敗：{r.status_code}')
     except Exception as e:
-        print(f'[Bot] 註冊指令時出錯：{e}')
+        logger.error('[Bot] 註冊指令時出錯：%s', e)

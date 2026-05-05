@@ -2,11 +2,14 @@
 統計查詢：累積勝率、按等級/乖離/月分組、settlement timeline。
 給 /report /stats 與 dashboard 用。
 """
+import logging
 import traceback
 
 from psycopg2.extras import RealDictCursor
 
 from db.conn import get_conn
+
+logger = logging.getLogger(__name__)
 
 
 def get_cumulative_stats(guild_id):
@@ -68,7 +71,7 @@ def get_cumulative_stats(guild_id):
                 cur.execute(bias_sql,  (guild_id,)); bias_rows  = list(cur.fetchall())
                 cur.execute(dual_sql,  (guild_id,)); dual_rows  = list(cur.fetchall())
     except Exception as e:
-        print(f'[DB] get_cumulative_stats 錯誤：{e}\n{traceback.format_exc()}')
+        logger.error('[DB] get_cumulative_stats 錯誤：%s\n%s', e, traceback.format_exc())
     return grade_rows, bias_rows, dual_rows
 
 
@@ -198,7 +201,7 @@ def get_aggregated_stats():
                 cur.execute(bias_sql);    out['bias']    = list(cur.fetchall())
                 cur.execute(monthly_sql); out['monthly'] = list(cur.fetchall())
     except Exception as e:
-        print(f'[DB] get_aggregated_stats 錯誤：{e}\n{traceback.format_exc()}')
+        logger.error('[DB] get_aggregated_stats 錯誤：%s\n%s', e, traceback.format_exc())
     return out
 
 
@@ -231,7 +234,7 @@ def get_aggregated_summary():
                 cur.execute(sql)
                 return cur.fetchone() or {}
     except Exception as e:
-        print(f'[DB] get_aggregated_summary 錯誤：{e}')
+        logger.error('[DB] get_aggregated_summary 錯誤：%s', e)
         return {}
 
 
@@ -271,5 +274,5 @@ def get_settlement_timeline(limit_settlements=26):
         w2 = [r for r in rows if r['series'] == 'w2'][-limit_settlements:]
         return {'w1': w1, 'w2': w2}
     except Exception as e:
-        print(f'[DB] get_settlement_timeline 錯誤：{e}\n{traceback.format_exc()}')
+        logger.error('[DB] get_settlement_timeline 錯誤：%s\n%s', e, traceback.format_exc())
         return {'w1': [], 'w2': []}

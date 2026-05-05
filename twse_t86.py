@@ -1,13 +1,15 @@
 """
 TWSE T86 三大法人買賣超：抓取 + 解析 + 30 分鐘共享快取。
 """
+import logging
 import time
 
 import pandas as pd
 
 import config
-from twse_http import safe_get, safe_read_csv, clean_sid
+from twse_http import clean_sid, safe_get, safe_read_csv
 
+logger = logging.getLogger(__name__)
 
 _T86_URL = 'https://www.twse.com.tw/rwd/zh/fund/T86'
 
@@ -17,7 +19,7 @@ _T86_CACHE = {}
 
 def parse_t86(text):
     """T86 CSV → DataFrame（含 sid_clean / _foreign / _trust / _total）"""
-    print(f'[T86] 前300字：\n{text[:300]}\n{"─" * 40}')
+    logger.debug('[T86] 前300字：%s', text[:300])
     lines = text.splitlines()
 
     header_idx = -1
@@ -26,18 +28,18 @@ def parse_t86(text):
             header_idx = i
             break
     if header_idx == -1:
-        print('[T86] 找不到表頭')
+        logger.warning('[T86] 找不到表頭')
         return pd.DataFrame()
 
-    print(f'[T86] 表頭第 {header_idx} 行：{lines[header_idx][:120]}')
+    logger.debug('[T86] 表頭第 %d 行：%s', header_idx, lines[header_idx][:120])
     df = safe_read_csv('\n'.join(lines[header_idx:]), 'T86', min_cols=11)
     if df.empty:
         return pd.DataFrame()
-    print(f'[T86] 共 {len(df.columns)} 欄：{list(df.columns)}')
+    logger.info('[T86] 共 %d 欄', len(df.columns))
 
     df = df[df.iloc[:, 0].astype(str).str.match(r'^[0-9A-Z]{4,6}$', na=False)].copy()
     if df.empty:
-        print('[T86] 過濾後無有效股票列')
+        logger.warning('[T86] 過濾後無有效股票列')
         return pd.DataFrame()
 
     df['sid_clean'] = clean_sid(df.iloc[:, 0])
@@ -48,18 +50,18 @@ def parse_t86(text):
         df['_foreign'] = pd.to_numeric(df.iloc[:, 4],  errors='coerce').fillna(0)
         df['_trust']   = pd.to_numeric(df.iloc[:, 10], errors='coerce').fillna(0)
         df['_total']   = pd.to_numeric(df.iloc[:, 18], errors='coerce').fillna(0)
-        print('[T86] 標準19欄格式，外資idx=4 投信idx=10 合計idx=18')
+        logger.debug('[T86] 標準19欄格式（外資idx=4 投信idx=10 合計idx=18）')
     elif n >= 11:
         df['_foreign'] = pd.to_numeric(df.iloc[:, 4],  errors='coerce').fillna(0)
         df['_trust']   = pd.to_numeric(df.iloc[:, 10], errors='coerce').fillna(0)
         df['_total']   = df['_foreign'] + df['_trust']
-        print(f'[T86] 備援{n}欄格式，外資idx=4 投信idx=10')
+        logger.warning('[T86] 備援 %d 欄格式（外資idx=4 投信idx=10）', n)
     else:
-        print(f'[T86] 欄位數不足({n})，無法解析')
+        logger.error('[T86] 欄位數不足(%d)，無法解析', n)
         return pd.DataFrame()
 
-    print(f'[T86] 有效股票：{len(df)} 檔，外資非零：{(df["_foreign"] != 0).sum()}，'
-          f'投信非零：{(df["_trust"] != 0).sum()}')
+    logger.info('[T86] 有效股票：%d 檔，外資非零：%d，投信非零：%d',
+                len(df), (df['_foreign'] != 0).sum(), (df['_trust'] != 0).sum())
     return df
 
 

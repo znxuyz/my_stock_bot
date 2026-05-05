@@ -1,12 +1,15 @@
 """
 TWSE MI_MARGN 融資融券餘額：今日 vs. 5 個交易日前增幅。
 """
+import logging
 import re as _re
 import time
 from datetime import datetime, timedelta
 
 import config
 from twse_http import safe_get
+
+logger = logging.getLogger(__name__)
 
 
 _MI_MARGN_URL = 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN'

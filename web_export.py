@@ -4,6 +4,7 @@ Web Dashboard 匯出：
   2. 透過 GitHub API 推回 docs/data/，GitHub Pages 由 docs/ 目錄 serve
 若 GITHUB_TOKEN / GITHUB_REPO 未設定則只在本機寫檔（除錯用）。
 """
+import logging
 import base64
 import json
 import os
@@ -15,6 +16,8 @@ import requests
 
 import config
 import db
+
+logger = logging.getLogger(__name__)
 
 
 DOCS_DIR = os.path.join(os.path.dirname(__file__), 'docs')
@@ -109,7 +112,7 @@ def build_payloads():
             with open(config.TOP_FLOW_CACHE, encoding='utf-8') as f:
                 payloads['topflow.json'] = json.load(f)
         except Exception as e:
-            print(f'[Web] 讀取 topflow 快取失敗：{e}')
+            logger.warning('[Web] 讀取 topflow 快取失敗：%s', e)
     return payloads
 
 
@@ -121,7 +124,7 @@ def write_local(payloads):
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
         size = len(json.dumps(data, default=_json_default))
-        print(f'[Web] 寫入本機：{path}（{size} bytes）')
+        logger.info('[Web] 寫入本機：%s（%d bytes）', path, size)
 
 
 # ─────────── GitHub push（含內容比對避免無謂 commit） ───────────
@@ -174,7 +177,7 @@ def push_file_to_github(repo_path, content_str, commit_msg):
             except Exception:
                 pass
     except Exception as e:
-        print(f'[Web] 取現有內容失敗（將直接 PUT）：{e}')
+        logger.warning('[Web] 取現有內容失敗（將直接 PUT）：%s', e)
 
     body = {
         'message': commit_msg,
@@ -199,35 +202,34 @@ def _diag():
             config.GITHUB_TOKEN[:8] + '...' + config.GITHUB_TOKEN[-4:]
             if len(config.GITHUB_TOKEN) > 16 else f'len={len(config.GITHUB_TOKEN)}'
         )
-    print(f'[Web] 設定 → REPO={config.GITHUB_REPO!r} BRANCH={config.GITHUB_BRANCH!r} '
-          f'TOKEN={token_disp!r} (len={len(config.GITHUB_TOKEN)})')
+    logger.info('[Web] 設定 → REPO=%r BRANCH=%r TOKEN=%r (len=%d)',
+                config.GITHUB_REPO, config.GITHUB_BRANCH, token_disp, len(config.GITHUB_TOKEN))
     if not config.GITHUB_TOKEN:
         return
     try:
         r = _gh_request('GET', '/user')
         if r.status_code == 200:
-            print(f"[Web] Token 有效，身份 = {r.json().get('login', '?')}")
+            logger.info('[Web] Token 有效，身份 = %s', r.json().get('login', '?'))
         else:
-            print(f'[Web] Token /user 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+            logger.warning('[Web] Token /user 測試失敗：HTTP %d %s', r.status_code, r.text[:200])
     except Exception as e:
-        print(f'[Web] Token /user 測試例外：{e}')
+        logger.warning('[Web] Token /user 測試例外：%s', e)
     try:
         r = _gh_request('GET', f'/repos/{config.GITHUB_REPO}')
         if r.status_code == 200:
             j = r.json()
-            print(f'[Web] Repo 可存取 → full_name={j.get("full_name")} '
-                  f'default_branch={j.get("default_branch")} '
-                  f'permissions={j.get("permissions")}')
+            logger.info('[Web] Repo 可存取 → full_name=%s default_branch=%s permissions=%s',
+                        j.get('full_name'), j.get('default_branch'), j.get('permissions'))
         else:
-            print(f'[Web] Repo 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+            logger.warning('[Web] Repo 測試失敗：HTTP %d %s', r.status_code, r.text[:200])
     except Exception as e:
-        print(f'[Web] Repo 測試例外：{e}')
+        logger.warning('[Web] Repo 測試例外：%s', e)
 
 
 def push_payloads(payloads):
     """全部 payload 推到 GitHub。內容無變動會跳過避免觸發 Railway redeploy。"""
     if not config.GITHUB_TOKEN or not config.GITHUB_REPO:
-        print('[Web] 略過 GitHub 上傳（未設定 GITHUB_TOKEN/GITHUB_REPO）')
+        logger.warning('[Web] 略過 GitHub 上傳（未設定 GITHUB_TOKEN/GITHUB_REPO）')
         return False
 
     ts = _tw_now_iso()
@@ -242,14 +244,14 @@ def push_payloads(payloads):
         if ok:
             if str(info).startswith('skipped:'):
                 skip += 1
-                print(f'[Web] ⏭️  {repo_path} 內容無變動，跳過 push')
+                logger.info('[Web] ⏭️  %s 內容無變動，跳過 push', repo_path)
             else:
                 upload += 1
-                print(f'[Web] ✅ 上傳 {repo_path} → {info[:8]}')
+                logger.info('[Web] ✅ 上傳 %s → %s', repo_path, info[:8])
         else:
             fail += 1
-            print(f'[Web] ❌ 上傳 {repo_path} 失敗：{info}')
-    print(f'[Web] push 總結：上傳 {upload} / 跳過 {skip} / 失敗 {fail}')
+            logger.error('[Web] ❌ 上傳 %s 失敗：%s', repo_path, info)
+    logger.info('[Web] push 總結：上傳 %d / 跳過 %d / 失敗 %d', upload, skip, fail)
     return fail == 0
 
 
@@ -267,9 +269,9 @@ def cache_top_flow(top_flow, screen_date_str=None):
         }
         with open(config.TOP_FLOW_CACHE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, default=_json_default)
-        print(f'[Web] 外資榜快取已寫入：{config.TOP_FLOW_CACHE}')
+        logger.info('[Web] 外資榜快取已寫入：%s', config.TOP_FLOW_CACHE)
     except Exception as e:
-        print(f'[Web] 寫外資榜快取失敗：{e}')
+        logger.warning('[Web] 寫外資榜快取失敗：%s', e)
 
 
 def export_dashboard(top_flow=None, screen_date_str=None):
@@ -282,12 +284,14 @@ def export_dashboard(top_flow=None, screen_date_str=None):
         write_local(payloads)
         push_payloads(payloads)
         total_count = sum(d.get('count', 0) for d in payloads.values() if isinstance(d, dict))
-        print(f'[Web] Dashboard 匯出完成，共 {total_count} 筆')
+        logger.info('[Web] Dashboard 匯出完成，共 %d 筆', total_count)
         return True
     except Exception as e:
-        print(f'[Web] 匯出失敗：{e}\n{traceback.format_exc()}')
+        logger.error('[Web] 匯出失敗：%s\n%s', e, traceback.format_exc())
         return False
 
 
 if __name__ == '__main__':
+    from logging_setup import setup_logging
+    setup_logging()
     export_dashboard()
