@@ -232,9 +232,9 @@ def fetch_top_traders(top_type='buy', n=10):
     else:
         rows = df[df['_foreign'] < 0].sort_values('_foreign', ascending=True).head(n)
 
+    # 用 to_dict('records'):itertuples 會把底線開頭欄位改名（同 topflow.py 的雷）
     result = []
-    for row in rows.itertuples(index=False):
-        row_dict = row._asdict() if hasattr(row, '_asdict') else dict(zip(rows.columns, row))
+    for row_dict in rows.to_dict('records'):
         result.append({
             'sid':     row_dict['sid_clean'],
             'name':    str(row_dict[name_col]).strip(),

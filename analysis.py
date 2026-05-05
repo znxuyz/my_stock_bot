@@ -97,12 +97,16 @@ def _normalise_record(e):
 
 
 def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
-    """第一輪篩選：收盤價 ≥ MIN_PRICE、漲幅 ≥ GRADE_A、法人買超門檻。"""
+    """第一輪篩選：收盤價 ≥ MIN_PRICE、漲幅 ≥ GRADE_A、法人買超門檻。
+
+    注意：用 to_dict('records') 而非 itertuples — 後者會把含特殊字元的欄位
+    （例如 '漲跌(+/-)'、底線開頭）改名成 _NN 位置索引，導致用原欄位名取值會 KeyError。
+    """
     candidates = []
     col_foreign, col_trust = '_foreign', '_trust'
-    for row in df.itertuples(index=False):
+    err_count = 0
+    for row_dict in df.to_dict('records'):
         try:
-            row_dict = row._asdict() if hasattr(row, '_asdict') else dict(zip(df.columns, row))
             sid   = row_dict['sid_clean']
             name  = str(row_dict.get('證券名稱', list(row_dict.values())[1])).strip()
             price = pd.to_numeric(str(row_dict[col_close]).replace(',', ''), errors='coerce')
@@ -137,7 +141,12 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
                 'total': int(total),
             })
         except Exception as e:
-            logger.warning('[第一輪] 處理列失敗：%s', e)
+            err_count += 1
+            # 同樣錯誤只 log 前 3 筆 + 最後總數，避免重複訊息塞爆 Railway log 額度
+            if err_count <= 3:
+                logger.warning('[第一輪] 處理列失敗：%s', e)
+    if err_count > 3:
+        logger.warning('[第一輪] 共 %d 列處理失敗（已抑制重複訊息）', err_count)
     return candidates
 
 
