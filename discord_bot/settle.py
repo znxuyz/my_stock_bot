@@ -14,15 +14,55 @@ from matching import get_period_kbars
 logger = logging.getLogger(__name__)
 
 
+def _compute_missed_hypothetical(settle_date, guild_id):
+    """
+    對 settle1_date = settle_date 的 missed 紀錄，補算「假設有買到」的結算結果。
+    用 t1_open_price 當假設進場價 + settle_date 收盤當結算價。
+    結果寫入 missed_settle1_close / missed_settle1_pct 兩欄，不動 fill_status。
+
+    只在 round_num=1 跑，避免 round 2 重複。
+    """
+    rows = db.get_missed_for_hypothetical(settle_date, guild_id)
+    if not rows:
+        return 0
+    n = 0
+    for r in rows:
+        try:
+            entry      = float(r['t1_open_price'])
+            entry_date = r['actual_entry_date']
+            if entry_date is None:
+                continue
+            df = get_period_kbars(r['sid'], entry_date, settle_date)
+            if df.empty:
+                continue
+            settle_close = float(df.iloc[-1]['close'])
+            pct = round((settle_close - entry) / entry * 100, 2)
+            db.update_missed_hypothetical(r['id'], settle_close, pct)
+            n += 1
+        except Exception as e:
+            logger.warning('[結算/missed假設] %s 補算失敗：%s', r.get('sid'), e)
+    if n:
+        logger.info('[結算/missed假設] %s guild=%s 補算 %d 筆', settle_date, guild_id, n)
+    return n
+
+
 def settle_weekly(settle_date, round_num, guild_id='default'):
     """
     結算 settle_date 這天到期的第 round_num 次結算。
     只結算 fill_status='filled'；報酬以 actual_entry_price 為基準；
     若觸停損 → settle_pct 強制視為 -5%；否則用 settle_close。
+    Round 1 額外補算 missed 紀錄的「假設有買到」結果（給保守度評估用）。
     """
     webhook = config.DISCORD_WEBHOOK
     if not webhook and not config.DATABASE_URL:
         return
+
+    # round 1 順便補算 missed 假設結算（不影響真實結算結果）
+    if round_num == 1:
+        try:
+            _compute_missed_hypothetical(settle_date, guild_id)
+        except Exception as e:
+            logger.warning('[結算/missed假設] %s 整體失敗：%s', settle_date, e)
 
     records = db.get_pending_settle(settle_date, round_num, guild_id)
     if not records:

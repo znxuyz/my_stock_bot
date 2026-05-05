@@ -60,10 +60,19 @@ def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high, allow_gap_d
     return ('filled', round(o, 2)) if allow_gap_down else ('missed', None)
 
 
-def fill_t1_entry(record_id, t1_date, status, entry_price):
-    """寫入 T+1 撮合結果。filled 會自動帶入三個目標停損價（× 1.05/1.10/0.95）。"""
+def fill_t1_entry(record_id, t1_date, status, entry_price, t1_open=None):
+    """
+    寫入 T+1 撮合結果。
+      filled：寫入 actual_entry_price + 三個目標停損（× 1.05/1.10/0.95）
+      missed：只寫日期 + fill_status
+    無論 filled / missed，t1_open_price 都會寫入（給「missed 假設有買到」分析用）。
+    若呼叫端沒傳 t1_open，會回退用 entry_price（filled 場景）。
+    """
+    open_price = float(t1_open) if t1_open is not None else (
+        float(entry_price) if entry_price is not None else None
+    )
     if status == 'filled' and entry_price is not None:
-        e   = float(entry_price)
+        e = float(entry_price)
         sql = """
         UPDATE screen_records SET
             actual_entry_date  = %s,
@@ -71,22 +80,60 @@ def fill_t1_entry(record_id, t1_date, status, entry_price):
             actual_target1     = %s,
             actual_target2     = %s,
             actual_stop_loss   = %s,
+            t1_open_price      = %s,
             fill_status        = 'filled'
         WHERE id = %s
         """
         params = (t1_date, e, round(e * 1.05, 2), round(e * 1.10, 2),
-                  round(e * 0.95, 2), record_id)
+                  round(e * 0.95, 2), open_price, record_id)
     else:
         sql = """
         UPDATE screen_records SET
             actual_entry_date = %s,
+            t1_open_price     = %s,
             fill_status       = 'missed'
         WHERE id = %s
         """
-        params = (t1_date, record_id)
+        params = (t1_date, open_price, record_id)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(sql, params)
+        conn.commit()
+
+
+def get_missed_for_hypothetical(settle_date, guild_id):
+    """
+    撈出 settle1_date = settle_date 且 fill_status = 'missed'
+    且還沒算過假設結算（missed_settle1_pct IS NULL）的紀錄。
+    給 settle_weekly 補算「如果有買到的話會賺多少」用。
+    """
+    sql = """
+    SELECT id, sid, name, grade, screen_date, actual_entry_date,
+           t1_open_price, close_price, settle1_date, position_pct
+    FROM screen_records
+    WHERE guild_id = %s AND settle1_date = %s AND fill_status = 'missed'
+      AND missed_settle1_pct IS NULL AND t1_open_price IS NOT NULL
+    """
+    with get_conn() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(sql, (guild_id, settle_date))
+            return cur.fetchall()
+
+
+def update_missed_hypothetical(record_id, settle_close, settle_pct):
+    """
+    寫入 missed 紀錄的「假設有買到」結算結果。
+    不動 fill_status / settle1_done（避免影響真實勝率統計）。
+    """
+    sql = """
+    UPDATE screen_records SET
+        missed_settle1_close = %s,
+        missed_settle1_pct   = %s
+    WHERE id = %s
+    """
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(sql, (settle_close, settle_pct, record_id))
         conn.commit()
 
 

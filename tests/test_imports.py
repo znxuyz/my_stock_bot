@@ -4,7 +4,7 @@
 def test_top_level_modules_import():
     import importlib
     for name in ('bot', 'stock_bot', 'analysis', 'matching', 'config', 'db',
-                 'discord_bot', 'web_export', 'logging_setup'):
+                 'discord_bot', 'web_export', 'logging_setup', 'entry_zone'):
         m = importlib.import_module(name)
         assert m is not None, f'{name} import returned None'
 
@@ -17,6 +17,9 @@ def test_db_package_exports():
         'record_run_start', 'record_run_end', 'can_run_today',
         'save_screen_records', 'determine_t1_fill', 'fill_t1_entry',
         'get_pending_settle', 'update_settle',
+        # v5 missed 假設結算
+        'get_missed_for_hypothetical', 'update_missed_hypothetical',
+        'get_missed_hypothetical_stats',
         'get_cumulative_stats', 'get_aggregated_stats',
         'get_holdings', 'add_holding', 'remove_holding',
         'get_challenge', 'add_challenge', 'clear_challenges',

@@ -15,6 +15,7 @@ import config
 import db
 from advanced_indicators import calc_advanced_indicators
 from chase import check_strong_chase, count_consecutive_limit_ups
+from entry_zone import calc_entry_zone
 from format_utils import fmt_share_signed as fmt_share
 from indicators import (
     calc_bias_and_entry, calc_macd, calc_volume_ratio, check_ema_bull,
@@ -232,9 +233,8 @@ def _build_stock_block(e):
         lines.append(f"乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
 
     mode = e.get('chase_mode', 'normal')
+    zl, zh = calc_entry_zone(e['price'], mode, grade=grade, precision=1)
     if mode == 'strong_chase':
-        zl = round(e['price'] * 1.00, 1)
-        zh = round(e['price'] * 1.07, 1)
         lines += ['', f"🚀強勢追漲（連續{e.get('consec_limit_up', 0)}日漲停）",
                   f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍隔日跳空 0~7%）",
                   "➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 則放棄；跳空跌破收盤視為趨勢反轉，不接刀"]
@@ -245,10 +245,9 @@ def _build_stock_block(e):
         if e.get('chase_check', {}).get('reasons'):
             lines += [f"  {r}" for r in e['chase_check']['reasons']]
     else:
-        zl = round(e['price'] * 0.97, 1)
-        zh = round(e['price'] * 1.00, 1)
+        gap_label = '3%' if grade == 'SS' else '2%'
         lines += ['', '🎯建議進場區（限價單）',
-                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元",
+                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍隔日跳空 0~{gap_label}）",
                   "➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%"]
 
     if adv.get('atr_stop'):

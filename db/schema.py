@@ -107,13 +107,26 @@ CREATE TABLE IF NOT EXISTS screen_records (
     hit_target1_date   DATE,
     hit_target2_date   DATE,
     hit_stoploss_date  DATE,
+    -- v5 追蹤欄位（無論 filled / missed 都寫入 t1_open_price，支援「missed 但漲了 X%」分析）
+    t1_open_price        NUMERIC(12,2),
+    missed_settle1_close NUMERIC(12,2),
+    missed_settle1_pct   NUMERIC(8,2),
     created_at         TIMESTAMP DEFAULT NOW()
 );
 """
 
+# v5 新增欄位：若 schema_version 沒變但程式版本已升級，用 ALTER TABLE 補欄位（保留歷史資料）
+_ENSURE_V5_COLUMNS_SQL = """
+ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS t1_open_price        NUMERIC(12,2);
+ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS missed_settle1_close NUMERIC(12,2);
+ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS missed_settle1_pct   NUMERIC(8,2);
+"""
+
 
 def init_db():
-    """初始化所有資料表；screen_records schema 版本不符時自動 DROP 重建。"""
+    """初始化所有資料表；schema 版本不符 → DROP 重建；
+    最後永遠跑 _ENSURE_V5_COLUMNS_SQL（IF NOT EXISTS 冪等），讓 v4→v5 升級不必清空資料。
+    """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(_OTHER_DDL)
@@ -125,5 +138,6 @@ def init_db():
                 set_schema_version(cur, config.SCHEMA_VERSION)
             else:
                 cur.execute(_SCREEN_DDL)
+            cur.execute(_ENSURE_V5_COLUMNS_SQL)
         conn.commit()
-    logger.info('[DB] 資料表初始化完成（screen_records %s）', config.SCHEMA_VERSION)
+    logger.info('[DB] 資料表初始化完成（screen_records %s + v5 追蹤欄位）', config.SCHEMA_VERSION)

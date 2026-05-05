@@ -28,6 +28,8 @@ from db.settle import (
     fill_t1_entry,
     get_pending_settle,
     update_settle,
+    get_missed_for_hypothetical,
+    update_missed_hypothetical,
 )
 from db.stats import (
     get_cumulative_stats,
@@ -37,6 +39,7 @@ from db.stats import (
     get_aggregated_stats,
     get_aggregated_summary,
     get_settlement_timeline,
+    get_missed_hypothetical_stats,
 )
 from db.holdings import (
     get_holdings,
@@ -64,9 +67,10 @@ __all__ = [
     'save_screen_records', 'get_records_needing_t1_check', 'get_total_screened',
     'next_friday', 'calc_position_pct',
     'determine_t1_fill', 'fill_t1_entry', 'get_pending_settle', 'update_settle',
+    'get_missed_for_hypothetical', 'update_missed_hypothetical',
     'get_cumulative_stats', 'get_latest_screen_date', 'get_screens_by_date',
     'get_history_records', 'get_aggregated_stats', 'get_aggregated_summary',
-    'get_settlement_timeline',
+    'get_settlement_timeline', 'get_missed_hypothetical_stats',
     'get_holdings', 'add_holding', 'remove_holding', 'get_pnl', 'get_leaderboard',
     'get_challenge', 'add_challenge', 'get_all_challenges', 'clear_challenges',
     'SCHEMA_VERSION', 'RUN_TIMEOUT_SEC',

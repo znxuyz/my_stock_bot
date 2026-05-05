@@ -238,6 +238,87 @@ def get_aggregated_summary():
         return {}
 
 
+def get_missed_hypothetical_stats():
+    """
+    跨 guild 彙總「missed 但漲了 X%」的反向統計，用來量化「保守過頭損失多少」。
+    只用 round 1 假設結算（missed_settle1_pct）。
+    回傳 dict：
+      total       missed 但已補算的筆數
+      win         其中 missed 但漲（pct > 0）的筆數 → 真的「該追沒追到」
+      win_rate    win / total（百分比；無資料 → None）
+      avg_ret     平均假設報酬
+      best        最大漲幅
+      worst       最大跌幅
+      by_grade    各等級的 [{grade, total, win, win_rate, avg_ret}]
+    """
+    summary_sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid) missed_settle1_pct
+        FROM screen_records
+        WHERE fill_status = 'missed' AND missed_settle1_pct IS NOT NULL
+        ORDER BY screen_date, sid, id
+    )
+    SELECT
+        COUNT(*)::int AS total,
+        SUM(CASE WHEN missed_settle1_pct > 0 THEN 1 ELSE 0 END)::int AS win,
+        AVG(missed_settle1_pct) AS avg_ret,
+        MAX(missed_settle1_pct) AS best,
+        MIN(missed_settle1_pct) AS worst
+    FROM dedup
+    """
+    grade_sql = """
+    WITH dedup AS (
+        SELECT DISTINCT ON (screen_date, sid) grade, missed_settle1_pct
+        FROM screen_records
+        WHERE fill_status = 'missed' AND missed_settle1_pct IS NOT NULL
+        ORDER BY screen_date, sid, id
+    )
+    SELECT grade,
+        COUNT(*)::int AS total,
+        SUM(CASE WHEN missed_settle1_pct > 0 THEN 1 ELSE 0 END)::int AS win,
+        AVG(missed_settle1_pct) AS avg_ret
+    FROM dedup
+    GROUP BY grade
+    ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
+                        WHEN 'A' THEN 3 WHEN 'CHASE' THEN 4
+                        WHEN 'WATCH' THEN 5 ELSE 6 END
+    """
+    out = {'total': 0, 'win': 0, 'win_rate': None,
+           'avg_ret': None, 'best': None, 'worst': None,
+           'by_grade': []}
+    try:
+        with get_conn() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(summary_sql)
+                row = cur.fetchone() or {}
+                total = int(row.get('total') or 0)
+                win   = int(row.get('win')   or 0)
+                out.update({
+                    'total':   total,
+                    'win':     win,
+                    'win_rate': round(win / total * 100, 1) if total else None,
+                    'avg_ret': float(row['avg_ret']) if row.get('avg_ret') is not None else None,
+                    'best':    float(row['best'])    if row.get('best')    is not None else None,
+                    'worst':   float(row['worst'])   if row.get('worst')   is not None else None,
+                })
+                cur.execute(grade_sql)
+                rows = []
+                for r in cur.fetchall():
+                    g_total = int(r['total'] or 0)
+                    g_win   = int(r['win']   or 0)
+                    rows.append({
+                        'grade':    r['grade'],
+                        'total':    g_total,
+                        'win':      g_win,
+                        'win_rate': round(g_win / g_total * 100, 1) if g_total else None,
+                        'avg_ret':  float(r['avg_ret']) if r['avg_ret'] is not None else None,
+                    })
+                out['by_grade'] = rows
+    except Exception as e:
+        logger.error('[DB] get_missed_hypothetical_stats 錯誤：%s\n%s', e, traceback.format_exc())
+    return out
+
+
 def get_settlement_timeline(limit_settlements=26):
     """依 settle1_date / settle2_date 分組，回傳兩條時間序列折線。"""
     sql = """

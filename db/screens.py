@@ -7,16 +7,15 @@ from psycopg2.extras import RealDictCursor
 
 from db.conn import get_conn
 from db.settle import calc_position_pct, next_friday
+from entry_zone import calc_entry_zone
 
 logger = logging.getLogger(__name__)
 
 
 def save_screen_records(records, screen_date, guild_id):
     """
-    寫入篩選結果。chase_mode 決定 entry_zone 與初始 fill_status：
-      normal       → zone = [close × 0.97, close × 1.00], pending
-      strong_chase → zone = [close × 1.00, close × 1.07], pending
-      watch        → zone = NULL                        , watch（不撮合）
+    寫入篩選結果。chase_mode + grade 決定 entry_zone（見 entry_zone.py）。
+    fill_status 初始：strong_chase / normal → 'pending'；watch → 'watch'（不撮合）。
 
     冪等：寫入前先 DELETE 同 (screen_date, guild_id) 的 pending 紀錄。
     """
@@ -25,17 +24,14 @@ def save_screen_records(records, screen_date, guild_id):
     rows = []
     for e in records:
         b      = e.get('bias') or {}
-        pos    = calc_position_pct(e.get('grade', ''), b.get('bias_pct'))
+        grade  = e.get('grade', '')
+        pos    = calc_position_pct(grade, b.get('bias_pct'))
         close  = float(e.get('price', 0))
         mode   = e.get('chase_mode', 'normal')
         consec = int(e.get('consec_limit_up', 0))
 
-        if mode == 'strong_chase':
-            zone_low, zone_high, init_fill = round(close * 1.00, 2), round(close * 1.07, 2), 'pending'
-        elif mode == 'watch':
-            zone_low, zone_high, init_fill = None, None, 'watch'
-        else:
-            zone_low, zone_high, init_fill = round(close * 0.97, 2), round(close * 1.00, 2), 'pending'
+        zone_low, zone_high = calc_entry_zone(close, mode, grade=grade, precision=2)
+        init_fill = 'watch' if mode == 'watch' else 'pending'
 
         rows.append((
             guild_id, screen_date,

@@ -8,6 +8,7 @@ import time
 import config
 from advanced_indicators import calc_advanced_indicators
 from chase import check_strong_chase, count_consecutive_limit_ups
+from entry_zone import calc_entry_zone
 from format_utils import fmt_share
 from indicators import (
     calc_bias_and_entry, calc_macd, calc_volume_ratio, check_ema_bull,
@@ -101,12 +102,7 @@ def analyze_stock_data(sid):
         elif chase['passed'] >= 4: chase_mode = 'watch'
         else:                       chase_mode = 'reject'
 
-    if chase_mode == 'strong_chase':
-        zone_low, zone_high = round(price * 1.00, 1), round(price * 1.07, 1)
-    elif chase_mode == 'normal':
-        zone_low, zone_high = round(price * 0.97, 1), round(price * 1.00, 1)
-    else:
-        zone_low = zone_high = None
+    zone_low, zone_high = calc_entry_zone(price, chase_mode, grade=grade, precision=1)
 
     return {
         'sid':       sid,
@@ -173,8 +169,9 @@ def format_stock_text(d):
     elif d['chase_mode'] == 'reject':
         lines += ['', f'❌連續{consec}日漲停但僅 {chase["passed"]}/5 過 — 風險過高，不推薦']
     else:
+        gap_label = '3%' if d.get('grade') == 'SS' else '2%'
         lines += ['', '🎯建議進場區（限價單）',
-                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元",
+                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元（容忍跳空 0~{gap_label}）",
                   '➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%',
                   f"預估目標一：{d['est_target1']:,.1f} 元　預估目標二：{d['est_target2']:,.1f} 元　預估停損：{d['est_stop_loss']:,.1f} 元"]
 

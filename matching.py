@@ -89,7 +89,8 @@ def fill_pending_t1_entries(today):
             allow_gap_down=allow_gap_down,
         )
         try:
-            db.fill_t1_entry(r['id'], kbar['date'], status, fill_price)
+            # 把 T+1 開盤價也傳進去，missed 也會留下這個資料供後續「假設有買到」分析
+            db.fill_t1_entry(r['id'], kbar['date'], status, fill_price, t1_open=kbar['open'])
             tag = '✅成交' if status == 'filled' else '❌未進場'
             fp  = f'@{fill_price}' if fill_price else ''
             logger.info('[T+1撮合] %s %s → %s %s %s', sid, sd, kbar['date'], tag, fp)

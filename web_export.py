@@ -60,6 +60,7 @@ def build_payloads():
     stats    = db.get_aggregated_stats()
     summary  = db.get_aggregated_summary()
     timeline = db.get_settlement_timeline(limit_settlements=26)
+    missed_hypo = db.get_missed_hypothetical_stats()
 
     stats_clean = {
         'grade':   [_row_to_dict(r) for r in stats.get('grade',   [])],
@@ -87,6 +88,9 @@ def build_payloads():
             'by_bias':    stats_clean['bias'],
             'by_month':   stats_clean['monthly'],
             'timeline':   timeline_clean,
+            # missed 假設結算：量化「保守過頭損失多少」
+            #   total / win / win_rate / avg_ret / best / worst / by_grade[]
+            'missed_hypo': missed_hypo,
         },
         'history.json': {
             'updated_at': updated_at,
