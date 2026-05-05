@@ -1,41 +1,30 @@
 """
-Web Dashboard 匯出模組
-======================
-盤後篩選完成後將彙總資料寫成 JSON，並透過 GitHub API 推回 repo 的 docs/data/
-GitHub Pages 從 docs/ 目錄 deploy，前端 fetch ./data/*.json 即可顯示。
-
-環境變數：
-    GITHUB_TOKEN  - GitHub PAT，需要 contents:write 權限
-    GITHUB_REPO   - 例如 'znxuyz/my_stock_bot'
-    GITHUB_BRANCH - 預設 'main'
-若任一未設定則只在本機寫檔（除錯用），不推到 GitHub。
+Web Dashboard 匯出：
+  1. 從 DB 撈彙總資料 → 寫成 docs/data/*.json
+  2. 透過 GitHub API 推回 docs/data/，GitHub Pages 由 docs/ 目錄 serve
+若 GITHUB_TOKEN / GITHUB_REPO 未設定則只在本機寫檔（除錯用）。
 """
-import os
-import json
+import logging
 import base64
+import json
+import os
 import traceback
-from datetime import datetime, date, timezone, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 
 import requests
 
-try:
-    import db as _db
-    _DB_OK = True
-except Exception as _e:
-    _DB_OK = False
-    print(f'[Web] 無法載入 db 模組：{_e}')
+import config
+import db
 
-DOCS_DIR  = os.path.join(os.path.dirname(__file__), 'docs')
-DATA_DIR  = os.path.join(DOCS_DIR, 'data')
-TOP_FLOW_CACHE = '/tmp/stockbot_topflow_cache.json'
-
-GITHUB_API     = 'https://api.github.com'
-GITHUB_TOKEN   = os.environ.get('GITHUB_TOKEN', '')
-GITHUB_REPO    = os.environ.get('GITHUB_REPO', 'znxuyz/my_stock_bot')
-GITHUB_BRANCH  = os.environ.get('GITHUB_BRANCH', 'main')
+logger = logging.getLogger(__name__)
 
 
+DOCS_DIR = os.path.join(os.path.dirname(__file__), 'docs')
+DATA_DIR = os.path.join(DOCS_DIR, 'data')
+
+
+# ─────────── JSON 序列化輔助 ───────────
 def _json_default(o):
     if isinstance(o, (datetime, date)):
         return o.isoformat()
@@ -61,22 +50,17 @@ def _tw_now_iso():
     return (datetime.now(timezone.utc) + timedelta(hours=8)).strftime('%Y-%m-%d %H:%M:%S')
 
 
+# ─────────── 組裝 payloads ───────────
 def build_payloads():
-    """從 DB 撈所有需要的資料，組成 JSON payload dict"""
-    if not _DB_OK:
-        raise RuntimeError('DB 模組未載入')
+    """從 DB 撈所有需要的資料，組成 JSON payload dict。"""
+    latest_date  = db.get_latest_screen_date()
+    today_rows   = [_row_to_dict(r) for r in db.get_screens_by_date(latest_date)] if latest_date else []
+    history_rows = [_row_to_dict(r) for r in db.get_history_records(limit_days=90)]
 
-    latest_date = _db.get_latest_screen_date()
-    today_rows  = []
-    if latest_date:
-        for r in _db.get_screens_by_date(latest_date):
-            today_rows.append(_row_to_dict(r))
-
-    history_rows = [_row_to_dict(r) for r in _db.get_history_records(limit_days=90)]
-
-    stats   = _db.get_aggregated_stats()
-    summary = _db.get_aggregated_summary()
-    timeline = _db.get_settlement_timeline(limit_settlements=26)
+    stats    = db.get_aggregated_stats()
+    summary  = db.get_aggregated_summary()
+    timeline = db.get_settlement_timeline(limit_settlements=26)
+    missed_hypo = db.get_missed_hypothetical_stats()
 
     stats_clean = {
         'grade':   [_row_to_dict(r) for r in stats.get('grade',   [])],
@@ -104,6 +88,9 @@ def build_payloads():
             'by_bias':    stats_clean['bias'],
             'by_month':   stats_clean['monthly'],
             'timeline':   timeline_clean,
+            # missed 假設結算：量化「保守過頭損失多少」
+            #   total / win / win_rate / avg_ret / best / worst / by_grade[]
+            'missed_hypo': missed_hypo,
         },
         'history.json': {
             'updated_at': updated_at,
@@ -112,48 +99,53 @@ def build_payloads():
         },
     }
 
-    # config.json：給前端讀取 Bot 的公開 API 網址
-    api_url = (os.environ.get('BOT_PUBLIC_URL', '').strip().rstrip('/')
-               or os.environ.get('RAILWAY_PUBLIC_DOMAIN', '').strip().rstrip('/'))
+    api_url = (
+        os.environ.get('BOT_PUBLIC_URL', '').strip().rstrip('/')
+        or os.environ.get('RAILWAY_PUBLIC_DOMAIN', '').strip().rstrip('/')
+    )
     if api_url and not api_url.startswith('http'):
         api_url = 'https://' + api_url
     payloads['config.json'] = {
         'updated_at': updated_at,
         'api_url':    api_url,
-        'schema':     'v4-macd-chase',
+        'schema':     config.SCHEMA_VERSION,
     }
 
-    # 外資買賣超榜（從 /tmp 快取讀；run_analysis 會在跑分析時寫入）
-    if os.path.exists(TOP_FLOW_CACHE):
+    if os.path.exists(config.TOP_FLOW_CACHE):
         try:
-            with open(TOP_FLOW_CACHE, encoding='utf-8') as f:
+            with open(config.TOP_FLOW_CACHE, encoding='utf-8') as f:
                 payloads['topflow.json'] = json.load(f)
         except Exception as e:
-            print(f'[Web] 讀取 topflow 快取失敗：{e}')
-
+            logger.warning('[Web] 讀取 topflow 快取失敗：%s', e)
     return payloads
 
 
+# ─────────── 寫本機 ───────────
 def write_local(payloads):
-    """寫到 docs/data/ 本機目錄"""
     os.makedirs(DATA_DIR, exist_ok=True)
     for fname, data in payloads.items():
         path = os.path.join(DATA_DIR, fname)
         with open(path, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=2, default=_json_default)
-        print(f'[Web] 寫入本機：{path}（{len(json.dumps(data, default=_json_default))} bytes）')
+        size = len(json.dumps(data, default=_json_default))
+        logger.info('[Web] 寫入本機：%s（%d bytes）', path, size)
 
 
+# ─────────── GitHub push（含內容比對避免無謂 commit） ───────────
 def _gh_request(method, path, **kwargs):
     headers = kwargs.pop('headers', {})
-    headers['Authorization'] = f'token {GITHUB_TOKEN}'
-    headers['Accept']        = 'application/vnd.github+json'
-    headers['X-GitHub-Api-Version'] = '2022-11-28'
-    return requests.request(method, f'{GITHUB_API}{path}', headers=headers, timeout=20, **kwargs)
+    headers['Authorization']         = f'token {config.GITHUB_TOKEN}'
+    headers['Accept']                = 'application/vnd.github+json'
+    headers['X-GitHub-Api-Version']  = '2022-11-28'
+    return requests.request(
+        method,
+        f'{config.GITHUB_API}{path}',
+        headers=headers, timeout=20, **kwargs,
+    )
 
 
 def _strip_volatile(obj):
-    """遞迴移除 JSON 中的時間戳欄位（updated_at / queried_at），用於比對是否有實質變動"""
+    """遞迴移除 updated_at / queried_at，做內容比對用。"""
     if isinstance(obj, dict):
         return {k: _strip_volatile(v) for k, v in obj.items()
                 if k not in ('updated_at', 'queried_at')}
@@ -163,49 +155,38 @@ def _strip_volatile(obj):
 
 
 def _is_meaningful_change(old_str, new_str):
-    """
-    比對兩份 JSON 是否有實質變動（忽略 updated_at / queried_at）。
-    若無變動回 False（→ 跳過 push 避免觸發 Railway redeploy 迴圈）。
-    """
+    """忽略時間戳後比對 JSON 是否實質變動。解析失敗保守視為「有變動」。"""
     try:
-        old_clean = _strip_volatile(json.loads(old_str))
-        new_clean = _strip_volatile(json.loads(new_str))
-        return old_clean != new_clean
+        return _strip_volatile(json.loads(old_str)) != _strip_volatile(json.loads(new_str))
     except Exception:
-        # 解析失敗時保守視為「有變動」，照樣 push
         return True
 
 
 def push_file_to_github(repo_path, content_str, commit_msg):
-    """PUT /repos/{owner}/{repo}/contents/{path}
-    若 GitHub 上的內容（移除時間戳後）跟本地一致，跳過 push 避免無謂的 commit。
-    """
-    if not GITHUB_TOKEN or not GITHUB_REPO:
+    """PUT /repos/{owner}/{repo}/contents/{path}；內容無實質變動就跳過。"""
+    if not config.GITHUB_TOKEN or not config.GITHUB_REPO:
         return False, 'GITHUB_TOKEN / GITHUB_REPO 未設定，跳過上傳'
 
-    api_path = f'/repos/{GITHUB_REPO}/contents/{repo_path}'
-    full_url = f'{GITHUB_API}{api_path}'
-
-    # 先查現有內容，比對 sha 與內容
+    api_path = f'/repos/{config.GITHUB_REPO}/contents/{repo_path}'
     sha = None
     try:
-        r = _gh_request('GET', api_path, params={'ref': GITHUB_BRANCH})
+        r = _gh_request('GET', api_path, params={'ref': config.GITHUB_BRANCH})
         if r.status_code == 200:
             existing = r.json()
             sha = existing.get('sha')
             try:
                 existing_content = base64.b64decode(existing.get('content', '')).decode('utf-8')
                 if not _is_meaningful_change(existing_content, content_str):
-                    return True, f'skipped:no-change'
+                    return True, 'skipped:no-change'
             except Exception:
                 pass
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning('[Web] 取現有內容失敗（將直接 PUT）：%s', e)
 
     body = {
         'message': commit_msg,
         'content': base64.b64encode(content_str.encode('utf-8')).decode('ascii'),
-        'branch':  GITHUB_BRANCH,
+        'branch':  config.GITHUB_BRANCH,
     }
     if sha:
         body['sha'] = sha
@@ -213,92 +194,92 @@ def push_file_to_github(repo_path, content_str, commit_msg):
     r = _gh_request('PUT', api_path, json=body)
     if r.status_code in (200, 201):
         return True, r.json().get('commit', {}).get('sha', '')
-    return False, f'HTTP {r.status_code} URL={full_url} BRANCH={GITHUB_BRANCH} body={r.text[:300]}'
+    return False, (f'HTTP {r.status_code} URL={config.GITHUB_API}{api_path} '
+                   f'BRANCH={config.GITHUB_BRANCH} body={r.text[:300]}')
 
 
 def _diag():
-    """印出當前 GitHub 設定供 debug（Token 只顯示前後 4 碼）"""
+    """印出當前 GitHub 設定供除錯（Token 只顯示前後 4 碼）。"""
     token_disp = ''
-    if GITHUB_TOKEN:
-        token_disp = (GITHUB_TOKEN[:8] + '...' + GITHUB_TOKEN[-4:]
-                      if len(GITHUB_TOKEN) > 16 else f'len={len(GITHUB_TOKEN)}')
-    print(f'[Web] 設定 → REPO={GITHUB_REPO!r} BRANCH={GITHUB_BRANCH!r} '
-          f'TOKEN={token_disp!r} (len={len(GITHUB_TOKEN)})')
-    if not GITHUB_TOKEN:
+    if config.GITHUB_TOKEN:
+        token_disp = (
+            config.GITHUB_TOKEN[:8] + '...' + config.GITHUB_TOKEN[-4:]
+            if len(config.GITHUB_TOKEN) > 16 else f'len={len(config.GITHUB_TOKEN)}'
+        )
+    logger.info('[Web] 設定 → REPO=%r BRANCH=%r TOKEN=%r (len=%d)',
+                config.GITHUB_REPO, config.GITHUB_BRANCH, token_disp, len(config.GITHUB_TOKEN))
+    if not config.GITHUB_TOKEN:
         return
-    # 試打 /user 確認 token 有效、認證身份
     try:
         r = _gh_request('GET', '/user')
         if r.status_code == 200:
-            who = r.json().get('login', '?')
-            print(f'[Web] Token 有效，身份 = {who}')
+            logger.info('[Web] Token 有效，身份 = %s', r.json().get('login', '?'))
         else:
-            print(f'[Web] Token /user 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+            logger.warning('[Web] Token /user 測試失敗：HTTP %d %s', r.status_code, r.text[:200])
     except Exception as e:
-        print(f'[Web] Token /user 測試例外：{e}')
-    # 試打 /repos/{REPO} 確認 token 看得到此 repo
+        logger.warning('[Web] Token /user 測試例外：%s', e)
     try:
-        r = _gh_request('GET', f'/repos/{GITHUB_REPO}')
+        r = _gh_request('GET', f'/repos/{config.GITHUB_REPO}')
         if r.status_code == 200:
             j = r.json()
-            print(f'[Web] Repo 可存取 → full_name={j.get("full_name")} '
-                  f'default_branch={j.get("default_branch")} '
-                  f'permissions={j.get("permissions")}')
+            logger.info('[Web] Repo 可存取 → full_name=%s default_branch=%s permissions=%s',
+                        j.get('full_name'), j.get('default_branch'), j.get('permissions'))
         else:
-            print(f'[Web] Repo 測試失敗：HTTP {r.status_code} {r.text[:200]}')
+            logger.warning('[Web] Repo 測試失敗：HTTP %d %s', r.status_code, r.text[:200])
     except Exception as e:
-        print(f'[Web] Repo 測試例外：{e}')
+        logger.warning('[Web] Repo 測試例外：%s', e)
 
 
 def push_payloads(payloads):
-    """把所有 payload 推到 GitHub。內容無實質變動時自動跳過避免觸發 Railway redeploy。"""
-    if not GITHUB_TOKEN or not GITHUB_REPO:
-        print('[Web] 略過 GitHub 上傳（未設定 GITHUB_TOKEN/GITHUB_REPO）')
+    """全部 payload 推到 GitHub。內容無變動會跳過避免觸發 Railway redeploy。"""
+    if not config.GITHUB_TOKEN or not config.GITHUB_REPO:
+        logger.warning('[Web] 略過 GitHub 上傳（未設定 GITHUB_TOKEN/GITHUB_REPO）')
         return False
 
     ts = _tw_now_iso()
-    upload_count = 0
-    skip_count   = 0
-    fail_count   = 0
+    upload = skip = fail = 0
     for fname, data in payloads.items():
-        content = json.dumps(data, ensure_ascii=False, indent=2, default=_json_default)
+        content   = json.dumps(data, ensure_ascii=False, indent=2, default=_json_default)
         repo_path = f'docs/data/{fname}'
-        ok, info = push_file_to_github(repo_path, content,
-                                       f'chore(dashboard): update {fname} ({ts})')
+        ok, info  = push_file_to_github(
+            repo_path, content,
+            f'chore(dashboard): update {fname} ({ts})',
+        )
         if ok:
             if str(info).startswith('skipped:'):
-                skip_count += 1
-                print(f'[Web] ⏭️  {repo_path} 內容無變動，跳過 push')
+                skip += 1
+                logger.info('[Web] ⏭️  %s 內容無變動，跳過 push', repo_path)
             else:
-                upload_count += 1
-                print(f'[Web] ✅ 上傳 {repo_path} → {info[:8]}')
+                upload += 1
+                logger.info('[Web] ✅ 上傳 %s → %s', repo_path, info[:8])
         else:
-            fail_count += 1
-            print(f'[Web] ❌ 上傳 {repo_path} 失敗：{info}')
-    print(f'[Web] push 總結：上傳 {upload_count} / 跳過 {skip_count} / 失敗 {fail_count}')
-    return fail_count == 0
+            fail += 1
+            logger.error('[Web] ❌ 上傳 %s 失敗：%s', repo_path, info)
+    logger.info('[Web] push 總結：上傳 %d / 跳過 %d / 失敗 %d', upload, skip, fail)
+    return fail == 0
 
 
+# ─────────── 對外入口 ───────────
 def cache_top_flow(top_flow, screen_date_str=None):
-    """把外資買賣超 Top 10 寫進 /tmp 快取，下次 build_payloads 會讀進 topflow.json"""
+    """run_analysis 跑完把外資榜寫入 /tmp 快取，build_payloads 會撈進 topflow.json。"""
     if not top_flow:
         return
     try:
         data = {
             'updated_at':  _tw_now_iso(),
             'screen_date': screen_date_str,
-            'buyers':      top_flow.get('buyers', []),
+            'buyers':      top_flow.get('buyers',  []),
             'sellers':     top_flow.get('sellers', []),
         }
-        with open(TOP_FLOW_CACHE, 'w', encoding='utf-8') as f:
+        with open(config.TOP_FLOW_CACHE, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, default=_json_default)
-        print(f'[Web] 外資榜快取已寫入：{TOP_FLOW_CACHE}')
+        logger.info('[Web] 外資榜快取已寫入：%s', config.TOP_FLOW_CACHE)
     except Exception as e:
-        print(f'[Web] 寫外資榜快取失敗：{e}')
+        logger.warning('[Web] 寫外資榜快取失敗：%s', e)
 
 
 def export_dashboard(top_flow=None, screen_date_str=None):
-    """主入口：盤後篩選完成後呼叫一次。若提供 top_flow 會一併輸出 topflow.json"""
+    """主入口：盤後篩選完成後呼叫一次。"""
     try:
         if top_flow is not None:
             cache_top_flow(top_flow, screen_date_str)
@@ -306,12 +287,15 @@ def export_dashboard(top_flow=None, screen_date_str=None):
         payloads = build_payloads()
         write_local(payloads)
         push_payloads(payloads)
-        print(f'[Web] Dashboard 匯出完成，共 {sum(d.get("count", 0) for d in payloads.values() if isinstance(d, dict))} 筆')
+        total_count = sum(d.get('count', 0) for d in payloads.values() if isinstance(d, dict))
+        logger.info('[Web] Dashboard 匯出完成，共 %d 筆', total_count)
         return True
     except Exception as e:
-        print(f'[Web] 匯出失敗：{e}\n{traceback.format_exc()}')
+        logger.error('[Web] 匯出失敗：%s\n%s', e, traceback.format_exc())
         return False
 
 
 if __name__ == '__main__':
+    from logging_setup import setup_logging
+    setup_logging()
     export_dashboard()
