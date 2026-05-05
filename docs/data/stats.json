@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-05-04 21:42:37",
+  "updated_at": "2026-05-05 09:40:23",
   "summary": {
     "total": 4,
     "filled": 0,
@@ -83,5 +83,14 @@
   "timeline": {
     "w1": [],
     "w2": []
+  },
+  "missed_hypo": {
+    "total": 0,
+    "win": 0,
+    "win_rate": null,
+    "avg_ret": null,
+    "best": null,
+    "worst": null,
+    "by_grade": []
   }
 }
