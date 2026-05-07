@@ -363,8 +363,12 @@ def run_analysis(attempt=0, run_mode=None):
     if r_price is None:
         _notify_all(f'❌ 無法取得 MI_INDEX 收盤資料（{date_str}）\n已重試多次，請手動 `/run` 重試。')
         return 'fail'
-    if df_i.empty or '查詢無資料' in r_price.text:
-        logger.info('[假日] %s TWSE 無資料，跳過分析', date_str)
+    # 真假日才會走到這（fetch_t86_cached parse 失敗時回 None，已在前面 'fail' 處理）
+    if df_i.empty:
+        logger.info('[假日] %s T86 回「查詢無資料」，跳過分析', date_str)
+        return 'holiday'
+    if '查詢無資料' in r_price.text:
+        logger.info('[假日] %s MI_INDEX 回「查詢無資料」，跳過分析', date_str)
         return 'holiday'
 
     try:
