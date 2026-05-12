@@ -1,9 +1,11 @@
 # PROJECT_STATUS.md
 
-> 最後更新：2026-05-05
+> 最後更新：2026-05-12
 > Schema 版本：`v4-macd-chase` + v5 追蹤欄位（ALTER TABLE 補上）
-> 部署狀態：main 上 commit `b5bea9c`，Bot 服務 https://mystockbot.up.railway.app
-> 重大改動：4 個大檔重構成 30+ 模組 + logging / DB 重試 / pytest + CI / 進場區間 v5
+> 部署狀態：main 上 commit `cf6d05f`，Bot 服務 https://mystockbot.up.railway.app
+> 重大改動：4 個大檔重構成 30+ 模組 + logging / DB 重試 / pytest + CI / 進場區間 v5 +
+>           5/5 篩選 KeyError critical fix + 5/7 T86 parse 誤判假日 critical fix +
+>           logging stdout/stderr 分流 + PWA icon / manifest（「量化篩選系統」）
 
 ---
 
@@ -16,7 +18,7 @@
 |------|------|
 | `bot.py` | 進入點（~70 行）：env 檢查 → init_db → register_commands → 啟動 scheduler / startup_export thread → ThreadingHTTPServer.serve_forever |
 | `config.py` | **集中所有環境變數 / 策略常數 / 路徑**，避免散落各處 |
-| `logging_setup.py` | 全域 logging 設定（時間戳 + level + 模組名稱）；`LOG_LEVEL` env 控制 |
+| `logging_setup.py` | 全域 logging 設定（時間戳 + level + 模組名稱）；**DEBUG/INFO → stdout、WARNING/ERROR/CRITICAL → stderr**（Railway log UI 才能正確分色）；`LOG_LEVEL` env 控制 |
 | `time_utils.py` | `tw_now / get_target_date / prev_months / next_friday / roc_to_date` |
 | `format_utils.py` | `fmt_share / fmt_share_signed / star_str / get_opt`（Discord interaction 取值） |
 
@@ -82,8 +84,13 @@
 | 檔案 | 職責 |
 |------|------|
 | `web_export.py` | `build_payloads / write_local / push_payloads / export_dashboard`；stats.json v5 起多 `missed_hypo` 欄位 |
-| `docs/index.html` | 靜態 dashboard（4 分頁 + FAB + Modal）。**尚未顯示 missed_hypo 資料**（資料已寫入 stats.json，UI 待加） |
+| `docs/index.html` | 靜態 dashboard（4 分頁 + FAB + Modal）；`<title>` 為「**量化篩選系統**」，`<head>` 含完整 icon / `manifest.json` / Apple meta / `theme-color #7FD4C1`。**尚未顯示 missed_hypo 資料**（資料已寫入 stats.json，UI 待加） |
+| `docs/manifest.json` | PWA manifest（standalone display，`#FFF5EC` 背景） |
+| `docs/apple-touch-icon-180/152/120.png` | iOS Add to Home Screen icon |
+| `docs/favicon-32x32.png` / `favicon-16x16.png` / `favicon.ico` | 桌面 / 舊瀏覽器分頁 icon（ico 含 16/32/48 多尺寸） |
+| `docs/android-chrome-192x192.png` / `512x512.png` | Android PWA 主屏 / splash maskable |
 | `docs/data/*.json` | Bot 自動產生的 5 個 JSON（today / stats / history / topflow / config） |
+| `icon.png`（根目錄）| PWA 圖示原始檔（1024×1024 RGB 不透明，edge-replicate padding 無白邊；重切時用） |
 
 ### 向下相容 shim
 | 檔案 | 職責 |
@@ -93,7 +100,7 @@
 ### 測試 / CI
 | 檔案 | 職責 |
 |------|------|
-| `tests/` | 10 個測試檔，68 個 pytest 測試（指標 / 評分 / 追漲 / 撮合 / 進場區間 / 時間 / topflow / imports / LAST_RUN 並發） |
+| `tests/` | 12 個測試檔，87 個 pytest 測試（indicators / scoring / chase / settle / entry_zone / topflow / time_utils / imports / LAST_RUN 並發 / logging_setup 路由 / filter_first_round regression / t86 holiday vs parse-fail regression） |
 | `.github/workflows/test.yml` | 每個 push / PR 跑 pyflakes + pytest（Python 3.11 與 3.12 雙版本） |
 | `requirements.txt` | 鎖版號：`requests>=2.31,<3` `pandas>=2.0,<3` `PyNaCl>=1.5,<2` `psycopg2-binary>=2.9,<3` |
 
@@ -111,10 +118,16 @@
    - T86 法人買賣超（`fetch_t86_cached`，30 分鐘 TTL）
    - MI_INDEX 收盤價
 3. 大盤外資連 3 日賣超 ≥500 億 → 直接 `suspend`，發 Discord 通知後 return 'success'
-4. T86/MI_INDEX 任一抓不到 → `_notify_all` 發「請手動 /run」並 return 'fail'
+4. T86 / MI_INDEX 結果三分支（v5.3 起 `fetch_t86_cached` 明確拆兩種失敗）：
+   - **抓取 / parse 失敗** → `df_i is None` → `'fail'` + Discord 通知，**不會被當假日吞掉**
+   - **真假日**（TWSE 回「查詢無資料」）→ `df_i.empty` → `'holiday'` 靜默跳過
+   - 成功 → 繼續走第一輪
+   `parse_t86` 找不到表頭時會 log 前 500 字回應內容供 debug
 
 ### Step 2：第一輪過濾（基本條件）
-`_filter_first_round` 對全部上市股票檢查（用 `itertuples` 取代舊的 `iterrows`）：
+`_filter_first_round` 對全部上市股票檢查（用 `to_dict('records')` 保留欄位名；
+itertuples 會把 `'漲跌(+/-)'`、底線開頭欄位改名為位置別名 `_4` 等，曾在 5/5
+17:00 造成全部 1000+ 列 KeyError → 0 檔通過篩選，已寫 regression 測試擋住）：
 1. 收盤價 ≥ `MIN_PRICE = 10`
 2. 漲幅 ≥ `GRADE_A = 1.0` (1%)
 3. 法人雙買超：外資 ≥ `MIN_FOREIGN_SHARE = 10000` AND 投信 ≥ `MIN_TRUST_SHARE = 10000`
@@ -322,6 +335,10 @@
 13. **DB 連線重試**：`get_conn` 在 `OperationalError` 時自動退避 5/15/30s 重試三次，Railway DB 短暫斷線不會炸掉整個分析。
 14. **LAST_RUN thread-safe**：scheduler thread 與 handler thread 透過 `update_last_run / get_last_run` 加鎖存取，不再依賴 GIL atomic dict。
 15. **graceful degradation**：DB 不可用時 handler 用 `_safe_call` 回友善訊息，而非直接 500。
+16. **DataFrame 不用 itertuples 讀含特殊字元欄位**：`'漲跌(+/-)'`、底線開頭欄位會被 pandas 改成位置別名 `_4` 之類，造成 `row_dict['原欄位']` KeyError。`_filter_first_round` / `fetch_top_traders` / `extract_top_flow` 全改用 `to_dict('records')`，regression 測試擋住此 case。
+17. **T86 / MI_INDEX「真假日」與「parse 失敗」必須區分**：`fetch_t86_cached` 真假日（TWSE 回「查詢無資料」）回 empty DataFrame（且快取）；parse 失敗（TWSE 回了不能解析的內容如限速錯誤頁）**回 `None` 且不快取**。analysis 對 `None` 視為 `'fail'` 通知用戶；對 empty 才當 `'holiday'` 靜默跳過。5/7 那次就是 parse 失敗被誤判假日靜默吞掉，已有 regression 測試。
+18. **logging stdout / stderr 分流**：DEBUG / INFO → stdout（Railway 一般顏色），WARNING / ERROR / CRITICAL → stderr（Railway 紅色）。讓「紅字 = 真的要看的問題」，雜訊比恢復正常。`logging_setup.setup_logging` 用 `_MaxLevelFilter` 把 INFO 留 stdout，stderr handler 從 WARNING 起。
+19. **PWA icon 用 edge-replicate 滿版**：原圖 4 角不能有 vignette 淺白漸層，否則 iOS 圓角 mask 切下去就是視覺白邊。處理流程：zoom 1.18× → center crop 中央 942×942 → `np.pad mode='edge'` 41px 四周到 1024×1024。對比驗證見 `docs/icon-before-after.png`。
 
 ---
 
@@ -340,7 +357,7 @@
 | `DISCORD_WEBHOOK`    | ⚪ | 空可，多伺服器靠 DB |
 | `RAILWAY_PUBLIC_DOMAIN` | ⚪ | Railway 自動注入（fallback） |
 | `PORT`               | ⚪ | Railway 自動注入（預設 8080） |
-| `LOG_LEVEL`          | ⚪ | `INFO`（預設）/ `DEBUG`（除錯時） |
+| `LOG_LEVEL`          | ⚪ | `INFO`（預設）/ `DEBUG`（除錯時）；DEBUG/INFO 走 stdout、WARNING+ 走 stderr |
 | `TWSE_VERIFY_SSL`    | ⚪ | `0`（預設關閉，TWSE 偶爾憑證錯誤）/ `1`（強制驗證） |
 
 ---
@@ -350,11 +367,11 @@
 | 項目 | 值 |
 |------|-----|
 | Schema 版本 | `v4-macd-chase` + v5 追蹤欄位 |
-| Bot 最新 commit | `b5bea9c`（main） |
+| Bot 最新 commit | `cf6d05f`（main） |
 | 重大改動 | 模組化重構 + logging / DB 重試 / pytest+CI / 進場區間 v5 |
 | Dashboard 版本 | v3 ・ 進場區間 + 雙勝率 |
 | Python | 3.11+（CI 跑 3.11 與 3.12） |
-| 測試覆蓋 | pytest 68 個測試（10 個檔） |
+| 測試覆蓋 | pytest 87 個測試（12 個檔） |
 | Railway 服務 | loyal-cooperation |
 | Railway 公開網址 | https://mystockbot.up.railway.app |
 | GitHub Pages | https://znxuyz.github.io/my_stock_bot/ |
@@ -363,10 +380,10 @@
 
 ## 十、開發 / 測試流程
 
-### 本機跑測試
+### 本機跑測試（87 個 pytest case）
 ```bash
 pip install -r requirements.txt
-pip install pytest pyflakes
+pip install pytest pyflakes Pillow numpy   # Pillow / numpy 給 PWA icon 切圖用
 python -m pytest tests/ -v
 python -m pyflakes *.py db/*.py discord_bot/*.py tests/*.py
 ```

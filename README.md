@@ -1,7 +1,8 @@
 # 川投顧量化系統 ── 台股 Discord Bot
 
 每個交易日盤後 17:00 自動抓 TWSE 法人 / 量價資料，篩選強勢股後推送到 Discord 頻道，
-同步更新 [Web Dashboard](https://znxuyz.github.io/my_stock_bot/)。
+同步更新 [Web Dashboard](https://znxuyz.github.io/my_stock_bot/)（**「量化篩選系統」PWA**，
+可加到 iOS / Android 主畫面當獨立 app）。
 
 | 服務 | 連結 |
 |------|------|
@@ -196,7 +197,7 @@ my_stock_bot/
 │   ├── index.html          # 4 分頁 Dashboard（今日 / 結算 / 勝率 / 歷史）
 │   └── data/*.json         # Bot 自動產生
 │
-└── tests/                  # 68 個 pytest 測試
+└── tests/                  # 87 個 pytest 測試（12 檔）
     ├── test_indicators.py
     ├── test_scoring.py
     ├── test_chase.py
@@ -205,7 +206,10 @@ my_stock_bot/
     ├── test_topflow.py
     ├── test_time_utils.py
     ├── test_imports.py
-    └── test_last_run.py
+    ├── test_last_run.py
+    ├── test_logging_setup.py            # 9 case：INFO→stdout / WARN+→stderr 路由
+    ├── test_filter_first_round.py       # 3 case：'漲跌(+/-)' 特殊欄位 regression
+    └── test_t86_holiday_vs_parsefail.py # 7 case：真假日 vs parse 失敗契約
 ```
 
 ---
@@ -226,7 +230,7 @@ my_stock_bot/
 ## CI / 測試
 
 ```bash
-# 完整測試（68 個）
+# 完整測試（87 個）
 python -m pytest tests/
 
 # 靜態檢查
@@ -290,8 +294,11 @@ python -m pyflakes *.py db/*.py discord_bot/*.py tests/*.py
 6. **schema_version 升級機制 + ALTER TABLE 補欄位**：策略大改 DROP 重建，欄位增補不掉資料
 7. **進場用實際 T+1 開盤** + **目標停損用實際進場價**：勝率為真實可達成
 8. **進場區間集中管理（v5）**：`entry_zone.py` 是所有 zone 計算的單一入口
-9. **logging 全面取代 print**：可由 `LOG_LEVEL=DEBUG` 控制細度
+9. **logging stdout / stderr 分流**：DEBUG/INFO → stdout（白）、WARNING+ → stderr（紅）讓 Railway log 紅字 = 真的要看的問題
 10. **DB 連線重試 + LAST_RUN 加鎖**：Railway DB 短斷線不會炸；scheduler / handler thread 不再 race
+11. **DataFrame 用 `to_dict('records')` 不用 `itertuples`**：itertuples 對含特殊字元（`'漲跌(+/-)'`、底線開頭）的欄位會改名為位置別名 → KeyError 全部跌出第一輪。已有 regression test 擋住
+12. **T86 真假日 vs parse 失敗必須分**：`fetch_t86_cached` 真假日回 empty df（快取）、parse 失敗回 `None`（不快取，caller 視為 fail 通知用戶）— 避免被「TWSE 限速錯誤頁」吞成假日
+13. **PWA icon 邊到邊飽和色**：原圖 4 角不能有 vignette 淺白漸層，否則 iOS 圓角 mask 切下去變視覺白邊（zoom 1.18× + center crop + `np.pad mode='edge'`）
 
 ---
 

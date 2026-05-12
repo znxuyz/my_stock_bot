@@ -23,21 +23,27 @@ Bot API:   https://mystockbot.up.railway.app
 
 ---
 
-## 檔案結構
+## 檔案結構（30+ 模組）
 
-| 檔案 | 說明 |
-|------|------|
-| bot.py            | Discord Bot 主程式、HTTP server、所有指令處理、scheduler |
-| stock_bot.py      | 選股核心邏輯、TWSE 抓取、技術指標計算、評分 |
-| db.py             | PostgreSQL 資料庫模組、所有 schema 與查詢 |
-| web_export.py     | Web Dashboard JSON 匯出 + GitHub API 推送 |
-| docs/index.html   | Dashboard 前端（HTML/CSS/JS 純靜態） |
-| docs/data/*.json  | Bot 自動產生的資料檔（today/stats/history/topflow/config） |
-| requirements.txt  | requests, pandas, PyNaCl, psycopg2-binary |
+原本 4 個大檔（bot.py 1572 / stock_bot.py 1758 / db.py 961 / web_export.py 317 行）
+已拆成依功能分檔的模組架構。完整檔案樹見 [`PROJECT_STATUS.md`](PROJECT_STATUS.md) 第一節。
+
+| 區塊 | 主要模組 |
+|------|---------|
+| **進入點 + 通用** | `bot.py`（~70 行 main）/ `config.py`（env + 常數）/ `logging_setup.py` / `time_utils.py` / `format_utils.py` |
+| **TWSE 抓資料** | `twse_http.py` / `twse_kbar.py` / `twse_t86.py` / `twse_market.py` / `twse_margin.py` |
+| **策略 / 指標** | `indicators.py` / `advanced_indicators.py` / `scoring.py` / `chase.py` / `topflow.py` / `entry_zone.py` |
+| **撮合 / 分析** | `matching.py` / `analysis.py` |
+| **DB 套件** | `db/` 9 個檔（conn / schema / guilds / runs / screens / settle / stats / holdings / challenges） |
+| **Discord Bot** | `discord_bot/` 11 個檔（handlers / scheduler / register / verify / content + 6 種 commands + settle） |
+| **Web Dashboard** | `web_export.py` / `docs/index.html` / `docs/data/*.json` / `docs/manifest.json` / `docs/apple-touch-icon-*.png` 等 PWA 資產 |
+| **向下相容** | `stock_bot.py`（thin shim 重新匯出）|
+| **測試 / CI** | `tests/` 12 檔 87 個 pytest case；`.github/workflows/test.yml` 跑 pyflakes + pytest（Python 3.11 / 3.12）|
+| **依賴** | `requirements.txt`：requests / pandas / PyNaCl / psycopg2-binary（鎖大版本） |
 
 ---
 
-## 篩選策略 v4
+## 篩選策略 v5（v4 評分 + v5 進場區間放寬 + missed 反向統計）
 
 ### 篩選漏斗（依序執行）
 
@@ -46,6 +52,7 @@ Bot API:   https://mystockbot.up.railway.app
 - 漲幅 ≥ 1%
 - 法人雙買超（外資 + 投信各 ≥ 10K 股）OR 單方買超 ≥ 100K 股
 - 取法人合計買超前 30 名
+- 用 `to_dict('records')` 讀 DataFrame（5/5 fix：itertuples 對 `'漲跌(+/-)'` 之類欄位會改名導致 KeyError）
 
 **第二輪：技術指標**
 - 量比 ≥ 1.5x（當日量 ÷ 5 日均量）
@@ -90,15 +97,19 @@ Bot API:   https://mystockbot.up.railway.app
 
 ---
 
-## 進場與結算邏輯（v4）
+## 進場與結算邏輯（v5）
 
-### 進場區間
+### 進場區間（v5 放寬）
 
 | 模式 | 區間 | 撮合特性 |
 |------|------|----------|
-| normal | [close × 0.97, close × 1.00] | 跳空跌破撿便宜 |
+| normal SS 級 | [close × 0.97, **close × 1.03**] | 容忍 3% 跳空（v5 放寬，避免最強標的常 missed） |
+| normal 其他級 | [close × 0.97, **close × 1.02**] | 容忍 2% 跳空 |
 | strong_chase | [close × 1.00, close × 1.07] | 跳空跌破不接刀（趨勢反轉訊號） |
 | watch | NULL | 不撮合，永遠標 'watch' |
+
+所有進場區間統一由 `entry_zone.calc_entry_zone(close, mode, grade)` 計算 — DB 寫入、
+Discord 訊息、`/stock` 顯示三處共用同一函式，避免散落各處改錯。
 
 ### T+1 撮合規則（限價單模擬）
 
@@ -123,6 +134,15 @@ Bot API:   https://mystockbot.up.railway.app
 
 - **進場率** = filled / (filled + missed)
 - **賺錢勝率** = (filled & settle_pct > 0) / filled
+
+### v5 missed 反向統計（量化「保守過頭損失多少」）
+
+`screen_records` 新增 `t1_open_price` / `missed_settle1_close` / `missed_settle1_pct`
+三個欄位（用 `ALTER TABLE IF NOT EXISTS` 加，**不掉歷史資料**）。
+
+每週五 18:00 結算時，除了結算 filled 紀錄外，會額外用 missed 紀錄的 T+1 開盤價
++ 結算日收盤計算「假設有買到會賺多少」。`db.get_missed_hypothetical_stats` 跨 guild
+彙總後寫進 `stats.json.missed_hypo`，用來判斷進場區間是否該再放寬。
 
 ---
 
@@ -150,9 +170,14 @@ Bot API:   https://mystockbot.up.railway.app
 
 ---
 
-## Web Dashboard
+## Web Dashboard（PWA 支援）
 
 網址：https://znxuyz.github.io/my_stock_bot/
+
+`<title>` 為「**量化篩選系統**」，含完整 `manifest.json` + 多尺寸 icon。
+iOS Safari「分享 → 加到主畫面」、Android Chrome「加到主畫面」都會把 dashboard
+變成獨立 app（`display: standalone`），icon 為主體背景色 edge-replicate 滿版
+（無白邊，套 iOS 圓角 mask 後邊緣仍是飽和橘/綠色）。
 
 ### 主畫面（4 個分頁）
 
@@ -215,7 +240,8 @@ Bot API:   https://mystockbot.up.railway.app
 - guild_settings、holdings、trades、pnl_summary、challenges
 
 ### Schema 升級機制
-SCHEMA_VERSION 變動時自動 DROP 重建 screen_records（清空舊資料）。
+- SCHEMA_VERSION 變動時自動 DROP 重建 screen_records（清空舊資料）
+- v5 起額外用 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 補欄位 → **不掉歷史資料**（新增 `t1_open_price` / `missed_settle1_close` / `missed_settle1_pct` 三欄走這條路）
 
 ---
 
@@ -261,6 +287,10 @@ SCHEMA_VERSION 變動時自動 DROP 重建 screen_records（清空舊資料）�
 3. **Railway redeploy 迴圈** — _startup_export 推同樣內容觸發新 commit → push 前比對內容，無變動則跳過
 4. **17:00 重複觸發** — Bot 重啟時 in-memory fired set 重置 → 用 DB analysis_runs 持久化
 5. **TWSE 限速** — 並發抓取超過 60~80/分鐘 → T86 快取 + K 棒快取 + sleep 0.8s + 自動退避
+6. **5/5 全部 0 檔通過篩選** — `_filter_first_round` 用 itertuples 對 `'漲跌(+/-)'` 等含特殊字元欄位會被改名為 `_4` → 改用 `to_dict('records')` 並加 regression test 擋住
+7. **5/7 真假日誤判** — TWSE 限速錯誤頁讓 `parse_t86` 回 empty df，被 caller 當假日靜默跳過 → `fetch_t86_cached` 拆兩種失敗：真假日回 empty + 快取，parse 失敗回 `None` + 不快取（caller 視為 `'fail'` 通知用戶）
+8. **Railway log 全紅難判讀** — 原 logging 全送 stderr，Railway UI 一律紅色 → 拆兩個 handler：DEBUG/INFO 走 stdout、WARNING+ 走 stderr
+9. **iOS Add to Home Screen 白邊** — 原 icon.png 4 角有 vignette 淺白漸層，iOS 圓角 mask 切下去變視覺白邊 → zoom 1.18× + center crop + edge-replicate pad 處理，邊緣全飽和色
 
 ---
 
