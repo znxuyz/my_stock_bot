@@ -5,3 +5,4 @@ __pycache__/
 .venv/
 backtest_data/
 backtest_results.csv
+settlement_report_*.xlsx
