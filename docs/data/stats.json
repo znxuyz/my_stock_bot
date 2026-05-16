@@ -1,173 +1,41 @@
 {
-  "updated_at": "2026-05-15 18:08:38",
+  "updated_at": "2026-05-16 14:09:32",
   "summary": {
-    "total": 91,
-    "filled": 74,
-    "missed": 8,
-    "pending": 9,
-    "settled1": 72,
-    "win1": 21,
-    "avg_ret1": -1.0275,
-    "settled2": 28,
-    "win2": 11,
-    "avg_ret2": 2.5610714285714287,
-    "best_ret1": 21.43,
-    "worst_ret1": -5.01
+    "total": 0,
+    "filled": null,
+    "missed": null,
+    "pending": null,
+    "settled1": null,
+    "win1": null,
+    "avg_ret1": null,
+    "settled2": null,
+    "win2": null,
+    "avg_ret2": null,
+    "best_ret1": null,
+    "worst_ret1": null
   },
-  "by_grade": [
-    {
-      "grade": "SS",
-      "total": 7,
-      "filled": 4,
-      "missed": 1,
-      "pending": 2,
-      "settled1": 4,
-      "settled2": 2,
-      "win1": 2,
-      "win2": 1,
-      "avg_ret1": -0.46,
-      "avg_ret2": -2.095,
-      "hit_t1": 3,
-      "hit_t2": 2,
-      "hit_sl": 1
-    },
-    {
-      "grade": "S",
-      "total": 37,
-      "filled": 31,
-      "missed": 0,
-      "pending": 6,
-      "settled1": 31,
-      "settled2": 12,
-      "win1": 6,
-      "win2": 5,
-      "avg_ret1": -2.1293548387096775,
-      "avg_ret2": 2.7308333333333334,
-      "hit_t1": 11,
-      "hit_t2": 5,
-      "hit_sl": 14
-    },
-    {
-      "grade": "A",
-      "total": 46,
-      "filled": 39,
-      "missed": 6,
-      "pending": 1,
-      "settled1": 37,
-      "settled2": 14,
-      "win1": 13,
-      "win2": 5,
-      "avg_ret1": -0.16567567567567568,
-      "avg_ret2": 3.0807142857142855,
-      "hit_t1": 21,
-      "hit_t2": 14,
-      "hit_sl": 22
-    },
-    {
-      "grade": "CHASE",
-      "total": 1,
-      "filled": 0,
-      "missed": 1,
-      "pending": 0,
-      "settled1": 0,
-      "settled2": 0,
-      "win1": 0,
-      "win2": 0,
-      "avg_ret1": null,
-      "avg_ret2": null,
-      "hit_t1": 0,
-      "hit_t2": 0,
-      "hit_sl": 0
-    }
-  ],
-  "by_bias": [
-    {
-      "bias_zone": "理想(0-5%)",
-      "total": 24,
-      "settled": 18,
-      "win": 3,
-      "avg_ret": -1.8855555555555557
-    },
-    {
-      "bias_zone": "略高(5-8%)",
-      "total": 20,
-      "settled": 15,
-      "win": 5,
-      "avg_ret": -1.934
-    },
-    {
-      "bias_zone": "過高(>8%)",
-      "total": 47,
-      "settled": 39,
-      "win": 13,
-      "avg_ret": -0.28282051282051285
-    }
-  ],
-  "by_month": [
-    {
-      "ym": "2026-05",
-      "total": 91,
-      "settled": 72,
-      "win": 21,
-      "avg_ret": -1.0275
-    }
-  ],
+  "counts": {
+    "momentum": 0,
+    "active": 0,
+    "setup": 0,
+    "watch": 0,
+    "noise": 0,
+    "total_pushed": 0
+  },
+  "by_status": [],
+  "by_bias": [],
+  "by_month": [],
   "timeline": {
-    "w1": [
-      {
-        "series": "w1",
-        "sdate": "2026-05-08",
-        "total": 27,
-        "wins": 8,
-        "avg_ret": -0.8429629629629629
-      },
-      {
-        "series": "w1",
-        "sdate": "2026-05-15",
-        "total": 45,
-        "wins": 13,
-        "avg_ret": -1.1382222222222222
-      }
-    ],
-    "w2": [
-      {
-        "series": "w2",
-        "sdate": "2026-05-15",
-        "total": 28,
-        "wins": 11,
-        "avg_ret": 2.5610714285714287
-      }
-    ]
+    "w1": [],
+    "w2": []
   },
   "missed_hypo": {
-    "total": 8,
-    "win": 5,
-    "win_rate": 62.5,
-    "avg_ret": 0.79125,
-    "best": 16.02,
-    "worst": -9.76,
-    "by_grade": [
-      {
-        "grade": "SS",
-        "total": 1,
-        "win": 1,
-        "win_rate": 100.0,
-        "avg_ret": 4.98
-      },
-      {
-        "grade": "A",
-        "total": 6,
-        "win": 4,
-        "win_rate": 66.7,
-        "avg_ret": 1.8516666666666668
-      },
-      {
-        "grade": "CHASE",
-        "total": 1,
-        "win": 0,
-        "win_rate": 0.0,
-        "avg_ret": -9.76
-      }
-    ]
+    "total": 0,
+    "win": 0,
+    "win_rate": null,
+    "avg_ret": null,
+    "best": null,
+    "worst": null,
+    "by_status": []
   }
 }
