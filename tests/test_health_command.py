@@ -174,12 +174,13 @@ def test_handler_defers_and_runs_health_for_any_user(monkeypatch):
                         lambda: (called.setdefault('hit', True) or
                                   {'title': 'X', 'color': 0, 'fields': []}))
     monkeypatch.setattr('discord_bot.handlers.threading.Thread',
-                        lambda target, daemon=True: type('T', (),
-                            {'start': lambda self: target()})())
+                        lambda target, daemon=True, args=(): type('T', (),
+                            {'start': lambda self: target(*args)})())
     monkeypatch.setattr('discord_bot.handlers._patch_embed',
-                        lambda token, embed: called.setdefault('embed_sent', True))
+                        lambda token, embed: (called.setdefault('embed_sent', True) or True))
 
-    handled = h._handle_admin('health', [], 'any_user', token='tok')
+    body = {'channel_id': 'ch_1'}
+    handled = h._handle_admin('health', [], body, token='tok')
     assert handled is True
     assert h.send_json_calls[0][1]['type'] == 5
     assert called.get('hit') is True

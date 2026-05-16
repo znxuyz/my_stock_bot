@@ -128,14 +128,16 @@ def test_handler_defers_and_calls_core_for_any_user(monkeypatch):
                                        {'title': 'X', 'color': 0, 'fields': []}))
     # 背景 thread 用同步替代以利驗證
     monkeypatch.setattr('discord_bot.handlers.threading.Thread',
-                        lambda target, daemon=True: type('T', (),
-                            {'start': lambda self: target()})())
+                        lambda target, daemon=True, args=(): type('T', (),
+                            {'start': lambda self: target(*args)})())
     # 攔截 followup patch
     monkeypatch.setattr('discord_bot.handlers._patch_embed',
-                        lambda token, embed: called.setdefault('embed_sent', True))
+                        lambda token, embed: (called.setdefault('embed_sent', True) or True))
 
-    handled = h._handle_admin('backfill', [{'name': 'days', 'value': 7}],
-                              'any_user', token='tok')
+    body = {'channel_id': 'ch_1', 'member': {'user': {'id': 'any_user'}}}
+    handled = h._handle_admin('backfill',
+                              [{'name': 'days', 'value': 7}],
+                              body, token='tok')
     assert handled is True
     assert h.send_json_calls[0][1]['type'] == 5  # deferred
     assert called.get('days') == 7
@@ -144,8 +146,9 @@ def test_handler_defers_and_calls_core_for_any_user(monkeypatch):
 
 def test_handler_returns_false_for_other_commands():
     h = _build_handler()
-    assert h._handle_admin('help', [], 'any_user', token='tok') is False
-    assert h._handle_admin('run',  [], 'any_user', token='tok') is False
+    body = {'channel_id': 'ch_1'}
+    assert h._handle_admin('help', [], body, token='tok') is False
+    assert h._handle_admin('run',  [], body, token='tok') is False
 
 
 # ─────────── CLI 與 Discord 共用同一個 backfill ───────────
@@ -190,7 +193,7 @@ def test_do_post_routes_backfill_to_admin_handler(monkeypatch):
 
     # 用 mock thread 攔下背景任務，避免真實去 patch followup
     monkeypatch.setattr('discord_bot.handlers.threading.Thread',
-                        lambda target, daemon=True: type('T', (),
+                        lambda target, daemon=True, args=(): type('T', (),
                             {'start': lambda self: None})())
 
     h = InteractionHandler.__new__(InteractionHandler)

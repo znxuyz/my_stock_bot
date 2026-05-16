@@ -76,7 +76,6 @@ def cmd_backfill_core(days=10):
     if written:
         fields.append({'name': '最早日期', 'value': written[0],  'inline': True})
         fields.append({'name': '最晚日期', 'value': written[-1], 'inline': True})
-        fields.append({'name': '​',   'value': '​',    'inline': True})
     if holiday:
         fields.append({'name': f'假日（{n_h}）',
                        'value': _trim(holiday), 'inline': False})

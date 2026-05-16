@@ -77,18 +77,93 @@ def _followup_url(token):
 
 def _patch(token, content):
     try:
-        req.patch(_followup_url(token), json={'content': content}, timeout=10)
+        r = req.patch(_followup_url(token),
+                      json={'content': content}, timeout=10)
+        if r.status_code >= 300:
+            logger.warning('[Followup] patch HTTP %d body=%s',
+                           r.status_code, r.text[:300])
+            return False
+        return True
     except Exception as e:
         logger.warning('[Followup] patch 失敗：%s', e)
+        return False
 
 
 def _patch_embed(token, embed):
     """送 Embed 回覆。embed 為 dict（Discord embed payload）。"""
     try:
-        req.patch(_followup_url(token),
-                  json={'embeds': [embed], 'content': ''}, timeout=10)
+        r = req.patch(_followup_url(token),
+                      json={'embeds': [embed]}, timeout=10)
+        if r.status_code >= 300:
+            logger.warning('[Followup] patch_embed HTTP %d body=%s',
+                           r.status_code, r.text[:300])
+            return False
+        return True
     except Exception as e:
         logger.warning('[Followup] patch_embed 失敗：%s', e)
+        return False
+
+
+def _channel_send_embed(channel_id, embed):
+    """當 followup token 過期（>15 min）或失敗時，改用 channel API 直接 POST 訊息。
+
+    需要 DISCORD_BOT_TOKEN 與 channel_id。失敗時 log warning，不 raise。
+    """
+    if not channel_id or not config.DISCORD_BOT_TOKEN:
+        logger.warning('[ChannelSend] 缺 channel_id 或 BOT_TOKEN，無法 fallback')
+        return False
+    url = f'https://discord.com/api/v10/channels/{channel_id}/messages'
+    headers = {'Authorization': f'Bot {config.DISCORD_BOT_TOKEN}'}
+    try:
+        r = req.post(url, headers=headers, json={'embeds': [embed]}, timeout=10)
+        if r.status_code >= 300:
+            logger.warning('[ChannelSend] HTTP %d body=%s',
+                           r.status_code, r.text[:300])
+            return False
+        return True
+    except Exception as e:
+        logger.warning('[ChannelSend] 失敗：%s', e)
+        return False
+
+
+FOLLOWUP_TOKEN_TTL_SEC = 15 * 60  # Discord interaction followup 上限
+
+
+def _bg_admin_run(name, token, channel_id, core_fn):
+    """背景跑 /backfill 或 /health 的核心邏輯。
+
+    - 任何例外都會被 catch 並回報（用 followup 或 channel API）
+    - 若執行 > 14 分鐘（接近 followup token 過期），改用 channel API 送
+    - 完整 traceback 寫進 log，方便事後排查
+    """
+    import time as _time
+    import traceback as _tb
+    started = _time.time()
+
+    try:
+        embed = core_fn()
+    except Exception as e:
+        logger.error('[%s] 背景例外：%s\n%s', name, e, _tb.format_exc())
+        ok = _patch(token, f'❌ {name} 例外：`{e}`')
+        if ok is False or _time.time() - started > FOLLOWUP_TOKEN_TTL_SEC - 60:
+            _channel_send_embed(channel_id, {
+                'title': f'❌ {name} 例外',
+                'description': f'`{e}`',
+                'color': 0xF85149,
+            })
+        return
+
+    elapsed = _time.time() - started
+    if elapsed > FOLLOWUP_TOKEN_TTL_SEC - 60:
+        logger.warning('[%s] 耗時 %.0fs 接近 followup token 上限，改走 channel API',
+                       name, elapsed)
+        if not _channel_send_embed(channel_id, embed):
+            logger.error('[%s] channel API fallback 也失敗，訊息遺失', name)
+        return
+
+    if not _patch_embed(token, embed):
+        logger.warning('[%s] followup PATCH 失敗，嘗試 channel API fallback', name)
+        _channel_send_embed(channel_id, embed)
 
 
 def _safe_call(fn, *args, fail_msg='❌ 暫時無法處理，稍後再試', **kwargs):
@@ -120,6 +195,12 @@ class InteractionHandler(BaseHTTPRequestHandler):
             self.send_header('Cache-Control',                'public, max-age=300')
         self.end_headers()
         self.wfile.write(data)
+        # v6.2.1: 顯式 flush 確保 Discord 在 3 秒超時前收到 type=5 defer，
+        # 否則 /backfill 這種長指令會卡在 "Thinking..." 永不消失。
+        try:
+            self.wfile.flush()
+        except Exception:
+            pass
 
     def do_OPTIONS(self):
         self.send_response(204)
@@ -189,7 +270,7 @@ class InteractionHandler(BaseHTTPRequestHandler):
             return
         if self._handle_setup(cmd, opts, body, uid):
             return
-        if self._handle_admin(cmd, opts, uid, token):
+        if self._handle_admin(cmd, opts, body, token):
             return
         if self._handle_async_stats(cmd, body, token):
             return
@@ -321,40 +402,34 @@ class InteractionHandler(BaseHTTPRequestHandler):
                 'content': f'❌ 無法連接 Webhook：{e}', 'flags': 64}})
         return True
 
-    def _handle_admin(self, cmd, opts, uid, token):
-        """v6.2 系統管理指令（/backfill /health）。開放給所有成員使用。"""
+    def _handle_admin(self, cmd, opts, body, token):
+        """v6.2 系統管理指令（/backfill /health）。開放給所有成員使用。
+
+        必須先 defer（送 type=5）才能 spawn 背景 thread，否則 Discord 3 秒沒收到
+        ACK 就會把 interaction 標記為 failed → "Thinking…" 卡死。
+        """
         if cmd not in ('backfill', 'health'):
             return False
 
-        # defer + 背景跑
+        # === 1. 立即 defer 並 flush（send_json 已包含 flush）===
         self.send_json(200, {'type': 5})
+
+        # 拿 channel_id 給 15 分鐘 fallback 用
+        channel_id = body.get('channel_id') or body.get('channel', {}).get('id')
 
         if cmd == 'backfill':
             days = get_opt(opts, 'days', 10) or 10
-
-            def _bg_bf():
-                try:
-                    embed = cmd_backfill_core(days=days)
-                except Exception as e:
-                    logger.error('[/backfill] 背景例外：%s', e)
-                    _patch(token, f'❌ /backfill 例外：{e}')
-                    return
-                _patch_embed(token, embed)
-
-            threading.Thread(target=_bg_bf, daemon=True).start()
+            threading.Thread(target=_bg_admin_run, daemon=True,
+                             args=('/backfill', token, channel_id,
+                                   lambda: cmd_backfill_core(days=days))
+                             ).start()
             return True
 
         if cmd == 'health':
-            def _bg_health():
-                try:
-                    embed = cmd_health_core()
-                except Exception as e:
-                    logger.error('[/health] 背景例外：%s', e)
-                    _patch(token, f'❌ /health 例外：{e}')
-                    return
-                _patch_embed(token, embed)
-
-            threading.Thread(target=_bg_health, daemon=True).start()
+            threading.Thread(target=_bg_admin_run, daemon=True,
+                             args=('/health', token, channel_id,
+                                   cmd_health_core)
+                             ).start()
             return True
 
         return False
