@@ -1,9 +1,9 @@
 """
-管理員 slash commands（v6.2）：
+管理 slash commands（v6.2）：
   /backfill — 手動補抓 T86 歷史
   /health   — 系統健康檢查（schema / 表完整性 / 今日筆數）
 
-權限：兩者都只允許 DISCORD_OWNER_ID 使用。
+開放給所有伺服器成員使用（不限管理員）。
 """
 import logging
 from datetime import date, timedelta
@@ -14,22 +14,12 @@ from tools.backfill_t86_history import backfill
 logger = logging.getLogger(__name__)
 
 
-_DENY_MESSAGE = '⛔ 此指令僅限管理員使用'
-
 _STATUS_COLOR = {
     'success': 0x3FB950,
     'partial': 0xD29922,
     'failure': 0xF85149,
     'info':    0x58A6FF,
 }
-
-
-def is_owner(uid):
-    """判斷使用者是否為 bot owner（依 DISCORD_OWNER_ID 比對）。"""
-    owner = (config.DISCORD_OWNER_ID or '').strip()
-    if not owner:
-        return False
-    return str(uid).strip() == owner
 
 
 def _trim(items, max_n=15):

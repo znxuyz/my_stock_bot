@@ -159,26 +159,11 @@ def test_health_core_handles_db_failure_gracefully(monkeypatch):
     assert len(failed_fields) >= 1
 
 
-# ─────────── HTTP handler dispatch ───────────
+# ─────────── HTTP handler dispatch（不限管理員） ───────────
 
-def test_handler_non_owner_rejected(monkeypatch):
+def test_handler_defers_and_runs_health_for_any_user(monkeypatch):
+    """任何使用者觸發 /health → defer + 背景跑 cmd_health_core。"""
     from discord_bot.handlers import InteractionHandler
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', 'owner_42')
-
-    h = InteractionHandler.__new__(InteractionHandler)
-    h.send_json_calls = []
-    h.send_json = lambda code, body, cors=False: h.send_json_calls.append((code, body))
-
-    handled = h._handle_admin('health', [], 'random_user', token='tok')
-    assert handled is True
-    _, body = h.send_json_calls[0]
-    assert '此指令僅限管理員使用' in body['data']['content']
-    assert body['data'].get('flags') == 64
-
-
-def test_handler_owner_defers_and_runs_health(monkeypatch):
-    from discord_bot.handlers import InteractionHandler
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', 'owner_42')
 
     h = InteractionHandler.__new__(InteractionHandler)
     h.send_json_calls = []
@@ -194,7 +179,7 @@ def test_handler_owner_defers_and_runs_health(monkeypatch):
     monkeypatch.setattr('discord_bot.handlers._patch_embed',
                         lambda token, embed: called.setdefault('embed_sent', True))
 
-    handled = h._handle_admin('health', [], 'owner_42', token='tok')
+    handled = h._handle_admin('health', [], 'any_user', token='tok')
     assert handled is True
     assert h.send_json_calls[0][1]['type'] == 5
     assert called.get('hit') is True

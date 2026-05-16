@@ -1,39 +1,17 @@
 """Discord /backfill 指令測試。
 
 涵蓋：
-  - is_owner 權限判定（DISCORD_OWNER_ID 未設定 / 不符 / 相符）
   - cmd_backfill_core 呼叫底層 backfill() 並組出 Embed
   - days 參數 clamp 到 [1, 60]
   - backfill() 例外 → 回 failure embed 而不是 raise
-  - HTTP handler 對非 owner 立即回 "⛔ 此指令僅限管理員使用"
-  - HTTP handler 對 owner 走 defer (type=5)
+  - HTTP handler 對 /backfill 走 defer (type=5)（所有成員都能用）
   - CLI 與 Discord 共用同一個 backfill 主函式（介面相容）
 """
 import json
 from unittest.mock import MagicMock
 
-import config
 from discord_bot import admin_commands as ac
 from tools import backfill_t86_history as bf
-
-
-# ─────────── is_owner ───────────
-
-def test_is_owner_returns_false_when_env_unset(monkeypatch):
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', '')
-    assert ac.is_owner('123') is False
-
-
-def test_is_owner_returns_false_for_other_user(monkeypatch):
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', '99999')
-    assert ac.is_owner('123') is False
-
-
-def test_is_owner_returns_true_for_matching_id(monkeypatch):
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', '99999')
-    assert ac.is_owner('99999') is True
-    # 也接受 int / str 混用
-    assert ac.is_owner(99999) is True
 
 
 # ─────────── cmd_backfill_core ───────────
@@ -124,12 +102,11 @@ def test_backfill_core_handles_exception(monkeypatch):
     assert embed['color'] == ac._STATUS_COLOR['failure']
 
 
-# ─────────── HTTP handler dispatch ───────────
+# ─────────── HTTP handler dispatch（不限管理員） ───────────
 
-def _build_handler(monkeypatch, owner_uid='owner_42'):
+def _build_handler():
     """建一個未綁 socket 的 InteractionHandler 用於單測 _handle_admin。"""
     from discord_bot.handlers import InteractionHandler
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', owner_uid)
 
     h = InteractionHandler.__new__(InteractionHandler)
     h.send_json_calls = []
@@ -141,23 +118,9 @@ def _build_handler(monkeypatch, owner_uid='owner_42'):
     return h
 
 
-def test_handler_rejects_non_owner_with_ephemeral_deny(monkeypatch):
-    h = _build_handler(monkeypatch, owner_uid='owner_42')
-    handled = h._handle_admin('backfill', [{'name': 'days', 'value': 10}],
-                              'random_user', token='tok')
-    assert handled is True
-    assert len(h.send_json_calls) == 1
-    code, body = h.send_json_calls[0]
-    assert code == 200
-    assert body['type'] == 4
-    assert '此指令僅限管理員使用' in body['data']['content']
-    # ephemeral flag
-    assert body['data'].get('flags') == 64
-
-
-def test_handler_owner_defers_and_calls_core(monkeypatch):
-    """owner 觸發 → type=5 deferred + 背景呼叫 cmd_backfill_core。"""
-    h = _build_handler(monkeypatch, owner_uid='owner_42')
+def test_handler_defers_and_calls_core_for_any_user(monkeypatch):
+    """任何使用者觸發 → type=5 deferred + 背景呼叫 cmd_backfill_core。"""
+    h = _build_handler()
 
     called = {}
     monkeypatch.setattr('discord_bot.handlers.cmd_backfill_core',
@@ -172,17 +135,17 @@ def test_handler_owner_defers_and_calls_core(monkeypatch):
                         lambda token, embed: called.setdefault('embed_sent', True))
 
     handled = h._handle_admin('backfill', [{'name': 'days', 'value': 7}],
-                              'owner_42', token='tok')
+                              'any_user', token='tok')
     assert handled is True
     assert h.send_json_calls[0][1]['type'] == 5  # deferred
     assert called.get('days') == 7
     assert called.get('embed_sent') is True
 
 
-def test_handler_returns_false_for_other_commands(monkeypatch):
-    h = _build_handler(monkeypatch, owner_uid='owner_42')
-    assert h._handle_admin('help', [], 'owner_42', token='tok') is False
-    assert h._handle_admin('run',  [], 'owner_42', token='tok') is False
+def test_handler_returns_false_for_other_commands():
+    h = _build_handler()
+    assert h._handle_admin('help', [], 'any_user', token='tok') is False
+    assert h._handle_admin('run',  [], 'any_user', token='tok') is False
 
 
 # ─────────── CLI 與 Discord 共用同一個 backfill ───────────
@@ -212,7 +175,6 @@ def test_do_post_routes_backfill_to_admin_handler(monkeypatch):
     """完整模擬 Discord interaction：dispatch 是否走到 _handle_admin。"""
     from discord_bot.handlers import InteractionHandler
 
-    monkeypatch.setattr(config, 'DISCORD_OWNER_ID', 'owner_42')
     # verify_signature 在 handlers.py 已綁定為 module-level 名字，需直接 patch 那裡
     monkeypatch.setattr('discord_bot.handlers.verify_signature',
                         lambda *a, **kw: True)
@@ -240,7 +202,7 @@ def test_do_post_routes_backfill_to_admin_handler(monkeypatch):
         'data': {'name': 'backfill',
                  'options': [{'name': 'days', 'value': 5}]},
         'token': 'tok',
-        'member': {'user': {'id': 'owner_42', 'username': 'me'}},
+        'member': {'user': {'id': 'any_user', 'username': 'me'}},
     }
     raw = json.dumps(body).encode('utf-8')
 
@@ -251,5 +213,5 @@ def test_do_post_routes_backfill_to_admin_handler(monkeypatch):
     h.do_POST()
 
     assert admin_called['count'] == 1
-    # type=5 deferred (owner 路徑)
+    # type=5 deferred
     assert h.send_json_calls[0][1]['type'] == 5

@@ -14,7 +14,7 @@ from format_utils import fmt_share, get_opt
 from time_utils import get_target_date, tw_now
 
 from discord_bot.admin_commands import (
-    cmd_backfill_core, cmd_health_core, is_owner,
+    cmd_backfill_core, cmd_health_core,
 )
 from discord_bot.basic_commands import cmd_fortune, cmd_help, cmd_poll, cmd_roast
 from discord_bot.challenge_commands import cmd_challenge
@@ -322,19 +322,11 @@ class InteractionHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle_admin(self, cmd, opts, uid, token):
-        """v6.2 管理員指令（/backfill /health）。回傳 True 表示已處理。"""
+        """v6.2 系統管理指令（/backfill /health）。開放給所有成員使用。"""
         if cmd not in ('backfill', 'health'):
             return False
 
-        # 權限檢查：非 owner → 立即拒絕（ephemeral / flags=64）
-        if not is_owner(uid):
-            self.send_json(200, {'type': 4, 'data': {
-                'content': '⛔ 此指令僅限管理員使用',
-                'flags': 64,
-            }})
-            return True
-
-        # owner → defer + 背景跑
+        # defer + 背景跑
         self.send_json(200, {'type': 5})
 
         if cmd == 'backfill':

@@ -9,7 +9,6 @@ DISCORD_BOT_TOKEN  = os.environ.get('DISCORD_BOT_TOKEN', '')
 DISCORD_PUBLIC_KEY = os.environ.get('DISCORD_PUBLIC_KEY', '')
 DISCORD_APP_ID     = os.environ.get('DISCORD_APP_ID', '')
 DISCORD_WEBHOOK    = os.environ.get('DISCORD_WEBHOOK', '')
-DISCORD_OWNER_ID   = os.environ.get('DISCORD_OWNER_ID', '')  # v6.2: /backfill /health 管理員指令
 
 # HTTP server port（Railway 會自動注入 PORT）
 PORT = int(os.environ.get('PORT', 8080))
