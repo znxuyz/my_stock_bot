@@ -42,7 +42,6 @@ from twse_kbar import build_history_fast
 from twse_market import fetch_market_foreign_history, get_market_info
 from twse_t86 import (
     fetch_t86_cached,
-    fetch_t86_multi_day,
     get_inst_history,
     save_t86_to_history,
 )
@@ -103,10 +102,158 @@ def _to_native(v):
 
 def _normalise_record(e):
     """把 entry dict 轉成可丟給 db.save_screen_records 的純值 dict。"""
-    out = {k: _to_native(v) for k, v in e.items() if k != 'bias'}
+    out = {k: _to_native(v) for k, v in e.items()
+           if k != 'bias' and not k.startswith('_')}
     if e.get('bias'):
         out['bias'] = {k: _to_native(v) for k, v in e['bias'].items()}
     return out
+
+
+def _ensure_t86_history_complete(target_date, days=10):
+    """檢查過去 N 個交易日 daily_t86_history 是否完整；缺哪天自動補抓。
+
+    流程：
+      1. 列出過去 N 個工作日（週末跳過）
+      2. 查 daily_t86_history 看哪些日期已有資料
+      3. 缺漏的逐日呼叫 fetch_t86_cached（共享快取，多半免再打 TWSE）
+      4. 抓回非空 df → save_t86_to_history；空 df → 假日；None → 失敗
+
+    回傳 dict：{checked, present, refetched, holiday, failed}。
+    """
+    # 延後 import 避免循環依賴
+    from twse_t86 import _prev_trading_days
+    from db.conn import get_conn
+
+    end_str = target_date.strftime('%Y%m%d')
+    expected_strs = _prev_trading_days(end_str, days)
+    expected_dates = [datetime.strptime(d, '%Y%m%d').date() for d in expected_strs]
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT date FROM daily_t86_history "
+                    "WHERE date >= %s AND date <= %s",
+                    (expected_dates[0], expected_dates[-1]),
+                )
+                present_dates = {r[0] for r in cur.fetchall()}
+    except Exception as e:
+        logger.warning('[T86 完整性] DB 查詢失敗：%s，跳過完整性檢查', e)
+        return {'checked': len(expected_dates), 'present': 0,
+                'refetched': 0, 'holiday': 0, 'failed': 0}
+
+    missing = [d for d in expected_dates if d not in present_dates]
+    if not missing:
+        logger.info('[T86 完整性] 過去 %d 天完整 ✓', days)
+        return {'checked': len(expected_dates),
+                'present': len(present_dates),
+                'refetched': 0, 'holiday': 0, 'failed': 0}
+
+    refetched = holiday = failed = 0
+    for d in missing:
+        d_str = d.strftime('%Y%m%d')
+        try:
+            df_t86 = fetch_t86_cached(d_str)
+            if df_t86 is None:
+                failed += 1
+                logger.debug('[T86 完整性] %s 抓取失敗', d_str)
+                continue
+            if df_t86.empty:
+                holiday += 1
+                continue
+            save_t86_to_history(d_str, df_t86)
+            refetched += 1
+        except Exception as e:
+            failed += 1
+            logger.warning('[T86 完整性] %s 補抓例外：%s', d_str, e)
+
+    logger.info('[T86 完整性] 補抓 %d 個缺漏（成功 %d / 假日 %d / 失敗 %d）',
+                len(missing), refetched, holiday, failed)
+    return {'checked': len(expected_dates),
+            'present': len(present_dates),
+            'refetched': refetched, 'holiday': holiday, 'failed': failed}
+
+
+def _backfill_score_trajectory(sid, df_hist, target_date, days=5):
+    """順手回算過去 N 天的 v6.2 分數，UPSERT 進 daily_scores。
+
+    對每個交易日 D（過去 days 天，含 target_date）：
+      - 用 df_hist 切到 D 為止當作該日的歷史 K 棒
+      - 5 日法人 window = daily_t86_history 裡 (D-4 ~ D) 的紀錄
+      - 該日 foreign+trust = 5 日 window 最後一筆的 net
+      - 重算 Flow/Trend/Heat → 寫 daily_scores
+
+    純讀本機快取 + DB，不打 TWSE。回傳寫入筆數。
+    """
+    if df_hist is None or df_hist.empty or 'date' not in df_hist.columns:
+        return 0
+
+    # 一次撈足夠久的法人歷史避免 N 次 DB 查詢
+    full_window = days + config.STALKER_DAYS  # 5 日 window × 過去 5 天 = 需要 9 天
+    try:
+        inst_full = get_inst_history(sid, days=full_window, end_date=target_date)
+    except Exception as e:
+        logger.warning('[trajectory] %s 法人歷史讀取失敗：%s', sid, e)
+        return 0
+    if not inst_full:
+        return 0
+
+    # df_hist 是 pandas DataFrame；把 date 轉成 python date 方便比較
+    dates_in_df = list(df_hist['date'])
+    dates_in_df_py = []
+    for d in dates_in_df:
+        dates_in_df_py.append(d.date() if hasattr(d, 'date') else d)
+
+    # 取最近 days 個交易日（含 target_date）
+    eligible = [d for d in dates_in_df_py if d <= target_date]
+    if len(eligible) < days:
+        return 0
+    trajectory_days = eligible[-days:]
+
+    written = 0
+    for D in trajectory_days:
+        # 切 K 棒到 D 為止
+        df_slice = df_hist[df_hist['date'].apply(
+            lambda x: (x.date() if hasattr(x, 'date') else x) <= D
+        )]
+        if len(df_slice) < 20:
+            continue
+
+        # 5 日法人 window ending D（取 inst_full 中 date <= D 的最後 5 筆）
+        relevant = [(d, n) for d, n in inst_full if d <= D]
+        if len(relevant) < config.STALKER_DAYS:
+            continue
+        inst_5d = relevant[-config.STALKER_DAYS:]
+
+        # 該日 foreign+trust 合計（用作 Flow 集中度條件 3）
+        net_on_D = inst_5d[-1][1]
+
+        setup = detect_stalker_setup(df_slice, inst_5d)
+        entry_for_score = {
+            'acc_buy_days': setup.get('buy_days', 0),
+            'acc_cum_net':  setup.get('cum_net', 0),
+            # 把 net（foreign+trust）塞 foreign 欄，trust 留 0；
+            # calc_flow_score 的 cond 3 用 max(0,foreign)+max(0,trust) → 結果不變
+            'foreign':      int(net_on_D),
+            'trust':        0,
+            'cum_5d_pct':   calc_5d_cumulative_change(df_slice),
+            'vol_vs_60d':   calc_vol_vs_60d_ratio(df_slice),
+            'bias_20':      calc_bias_20(df_slice),
+            'macd_info':    calc_macd(df_slice),
+        }
+        result = calc_score_v62(entry_for_score, df_slice)
+        try:
+            db.save_daily_score(
+                sid=sid, date=D,
+                flow=result['flow_score'], trend=result['trend_score'],
+                heat=result['heat_score'], total=result['total_score'],
+                status=result['status'],
+            )
+            written += 1
+        except Exception as e:
+            logger.warning('[trajectory] %s %s 寫入失敗：%s', sid, D, e)
+
+    return written
 
 
 def _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign):
@@ -368,17 +515,19 @@ def run_analysis(attempt=0, run_mode=None):
         if not all([col_close, col_diff]):
             raise ValueError(f'找不到收盤/漲跌欄：{list(df.columns)}')
 
-        # v6.2 新：抓多日 T86 → 寫 history（給 Stalker 偵測讀）
-        try:
-            multi = fetch_t86_multi_day(date_str, days=config.STALKER_DAYS)
-            saved = 0
-            for d_str, d_df in multi.items():
-                saved += save_t86_to_history(d_str, d_df)
-            logger.info('[T86 history] %d 日抓取、共寫入 %d 筆', len(multi), saved)
-        except Exception as e:
-            logger.warning('[T86 history] 失敗：%s', e)
-
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
+
+        # v6.2：寫今日 T86 進 history（給 Stalker 5 日偵測讀）
+        try:
+            save_t86_to_history(date_str, df_i)
+        except Exception as e:
+            logger.warning('[T86 history] 寫入今日失敗：%s', e)
+
+        # v6.2：過去 10 個交易日 T86 完整性檢查（缺哪天自動補抓）
+        try:
+            _ensure_t86_history_complete(target_date, days=10)
+        except Exception as e:
+            logger.warning('[T86 完整性] 整體例外：%s', e)
 
         # 第一輪
         candidates = _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign)
@@ -402,6 +551,7 @@ def run_analysis(attempt=0, run_mode=None):
         months = prev_months(date_str, n=7)
         logger.info('[EMA] 月份清單：%s', months)
         enriched = []
+        df_hist_by_sid = {}  # 給「5 日分數軌跡回算」用，不再 build_history_fast 第二次
         consec_fails = 0
 
         for idx_c, entry in enumerate(candidates):
@@ -434,6 +584,7 @@ def run_analysis(attempt=0, run_mode=None):
                 result = _enrich_candidate_v62(entry, df_hist, target_date, inst_hist)
                 if result is not None:
                     enriched.append(result)
+                    df_hist_by_sid[sid] = df_hist
                     logger.info(
                         "  [%d/%d] %s %s ✓ %d/10 %s 累積%d/5 %.1fs",
                         idx_c + 1, len(candidates), sid, entry.get('name', ''),
@@ -455,7 +606,9 @@ def run_analysis(attempt=0, run_mode=None):
 
         push_list = buckets['MOMENTUM'] + buckets['ACTIVE'] + buckets['SETUP']
 
-        # 寫 daily_scores（所有 enriched candidate 都寫，含 WATCH/NOISE）
+        # 寫 daily_scores（所有 enriched candidate 都寫，含 WATCH/NOISE）+
+        # 順手回算過去 5 天分數軌跡（給 Phase 2 velocity 排序鍵 / Discord 卡片用）
+        traj_total = 0
         try:
             for r in enriched:
                 db.save_daily_score(
@@ -464,8 +617,18 @@ def run_analysis(attempt=0, run_mode=None):
                     heat=r['heat_score'], total=r['total_score'],
                     status=r['status'],
                 )
+                df_hist_cache = df_hist_by_sid.get(r['sid'])
+                if df_hist_cache is not None:
+                    try:
+                        traj_total += _backfill_score_trajectory(
+                            r['sid'], df_hist_cache, target_date, days=5,
+                        )
+                    except Exception as e:
+                        logger.warning('[trajectory] %s 回算失敗：%s', r['sid'], e)
         except Exception as e:
             logger.error('[daily_scores] 寫入失敗：%s', e)
+        if traj_total:
+            logger.info('[trajectory] 共回算 %d 筆過去 5 日分數軌跡', traj_total)
 
         # 寫 screen_records（只寫 SETUP+，WATCH/NOISE 不進主表）
         try:
