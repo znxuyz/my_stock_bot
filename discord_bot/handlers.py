@@ -13,6 +13,9 @@ import db
 from format_utils import fmt_share, get_opt
 from time_utils import get_target_date, tw_now
 
+from discord_bot.admin_commands import (
+    cmd_backfill_core, cmd_health_core, is_owner,
+)
 from discord_bot.basic_commands import cmd_fortune, cmd_help, cmd_poll, cmd_roast
 from discord_bot.challenge_commands import cmd_challenge
 from discord_bot.portfolio_commands import (
@@ -77,6 +80,15 @@ def _patch(token, content):
         req.patch(_followup_url(token), json={'content': content}, timeout=10)
     except Exception as e:
         logger.warning('[Followup] patch 失敗：%s', e)
+
+
+def _patch_embed(token, embed):
+    """送 Embed 回覆。embed 為 dict（Discord embed payload）。"""
+    try:
+        req.patch(_followup_url(token),
+                  json={'embeds': [embed], 'content': ''}, timeout=10)
+    except Exception as e:
+        logger.warning('[Followup] patch_embed 失敗：%s', e)
 
 
 def _safe_call(fn, *args, fail_msg='❌ 暫時無法處理，稍後再試', **kwargs):
@@ -176,6 +188,8 @@ class InteractionHandler(BaseHTTPRequestHandler):
         if self._handle_holding(cmd, opts, body, uid, uname, token):
             return
         if self._handle_setup(cmd, opts, body, uid):
+            return
+        if self._handle_admin(cmd, opts, uid, token):
             return
         if self._handle_async_stats(cmd, body, token):
             return
@@ -306,6 +320,52 @@ class InteractionHandler(BaseHTTPRequestHandler):
             self.send_json(200, {'type': 4, 'data': {
                 'content': f'❌ 無法連接 Webhook：{e}', 'flags': 64}})
         return True
+
+    def _handle_admin(self, cmd, opts, uid, token):
+        """v6.2 管理員指令（/backfill /health）。回傳 True 表示已處理。"""
+        if cmd not in ('backfill', 'health'):
+            return False
+
+        # 權限檢查：非 owner → 立即拒絕（ephemeral / flags=64）
+        if not is_owner(uid):
+            self.send_json(200, {'type': 4, 'data': {
+                'content': '⛔ 此指令僅限管理員使用',
+                'flags': 64,
+            }})
+            return True
+
+        # owner → defer + 背景跑
+        self.send_json(200, {'type': 5})
+
+        if cmd == 'backfill':
+            days = get_opt(opts, 'days', 10) or 10
+
+            def _bg_bf():
+                try:
+                    embed = cmd_backfill_core(days=days)
+                except Exception as e:
+                    logger.error('[/backfill] 背景例外：%s', e)
+                    _patch(token, f'❌ /backfill 例外：{e}')
+                    return
+                _patch_embed(token, embed)
+
+            threading.Thread(target=_bg_bf, daemon=True).start()
+            return True
+
+        if cmd == 'health':
+            def _bg_health():
+                try:
+                    embed = cmd_health_core()
+                except Exception as e:
+                    logger.error('[/health] 背景例外：%s', e)
+                    _patch(token, f'❌ /health 例外：{e}')
+                    return
+                _patch_embed(token, embed)
+
+            threading.Thread(target=_bg_health, daemon=True).start()
+            return True
+
+        return False
 
     def _handle_async_stats(self, cmd, body, token):
         if cmd not in ('report', 'stats'):

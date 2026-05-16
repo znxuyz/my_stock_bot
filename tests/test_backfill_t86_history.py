@@ -1,4 +1,8 @@
-"""tools/backfill_t86_history.py 測試（mock fetch + save，不打 TWSE / DB）。"""
+"""tools/backfill_t86_history.py 測試（mock fetch + save，不打 TWSE / DB）。
+
+v6.2：backfill() 回 dict（不再是 tuple），含 written/holiday/failed 三條日期清單 +
+total_rows 總筆數。CLI 與 Discord /backfill 都共用這個主函式。
+"""
 import pandas as pd
 
 from tools import backfill_t86_history as bf
@@ -17,12 +21,27 @@ def test_prev_workdays_from_friday():
     assert out == ['20260513', '20260514', '20260515']
 
 
+def test_backfill_returns_dict_with_expected_keys(monkeypatch):
+    """v6.2 backfill 回 dict，含 written/holiday/failed/total_rows 等欄位。"""
+    monkeypatch.setattr(bf, 'fetch_t86_cached',
+                        lambda d: pd.DataFrame([{'sid_clean': '2330',
+                                                  '_foreign': 100, '_trust': 0,
+                                                  '_dealer': 0}]))
+    monkeypatch.setattr(bf, 'save_t86_to_history', lambda d, df: 1)
+
+    r = bf.backfill(days=3, end_date_str='20260515', sleep_between=0)
+    assert isinstance(r, dict)
+    assert set(r.keys()) >= {
+        'requested_days', 'end_date',
+        'written_dates', 'holiday_dates', 'failed_dates', 'total_rows',
+    }
+    assert r['requested_days'] == 3
+    assert r['end_date'] == '20260515'
+
+
 def test_backfill_counts_success_holiday_failed(monkeypatch):
     """三種回值的計數要分開：成功 / 假日 / 失敗。"""
-    calls = []
-
     def fake_fetch(date_str):
-        calls.append(('fetch', date_str))
         if date_str.endswith('11'):
             return None                       # 失敗
         if date_str.endswith('12'):
@@ -30,21 +49,20 @@ def test_backfill_counts_success_holiday_failed(monkeypatch):
         return pd.DataFrame([{'sid_clean': '2330', '_foreign': 100,
                               '_trust': 0, '_dealer': 0}])  # 成功
 
-    def fake_save(date_str, df):
-        calls.append(('save', date_str))
-        return len(df)
-
+    save_calls = []
     monkeypatch.setattr(bf, 'fetch_t86_cached', fake_fetch)
-    monkeypatch.setattr(bf, 'save_t86_to_history', fake_save)
+    monkeypatch.setattr(bf, 'save_t86_to_history',
+                        lambda d, df: (save_calls.append(d) or 1))
 
-    s, h, f = bf.backfill(days=5, end_date_str='20260515', sleep_between=0)
-    # 5/11~15：11 失敗、12 假日、13/14/15 成功
-    assert s == 3
-    assert h == 1
-    assert f == 1
-    # 成功的天才會呼叫 save
-    save_calls = [d for tag, d in calls if tag == 'save']
+    r = bf.backfill(days=5, end_date_str='20260515', sleep_between=0)
+    assert len(r['written_dates']) == 3
+    assert len(r['holiday_dates']) == 1
+    assert len(r['failed_dates']) == 1
+    assert r['total_rows'] == 3
     assert set(save_calls) == {'20260513', '20260514', '20260515'}
+    # holiday / failed 日期落在正確 bucket
+    assert '20260511' in r['failed_dates']
+    assert '20260512' in r['holiday_dates']
 
 
 def test_backfill_does_not_abort_on_exception(monkeypatch):
@@ -55,17 +73,13 @@ def test_backfill_does_not_abort_on_exception(monkeypatch):
         return pd.DataFrame([{'sid_clean': '2330', '_foreign': 100,
                               '_trust': 0, '_dealer': 0}])
 
-    def fake_save(date_str, df):
-        return 1
-
     monkeypatch.setattr(bf, 'fetch_t86_cached', fake_fetch)
-    monkeypatch.setattr(bf, 'save_t86_to_history', fake_save)
+    monkeypatch.setattr(bf, 'save_t86_to_history', lambda d, df: 1)
 
-    s, h, f = bf.backfill(days=5, end_date_str='20260515', sleep_between=0)
-    # 5 個工作日，5/14 例外 → 成功 4 / 失敗 1
-    assert s == 4
-    assert h == 0
-    assert f == 1
+    r = bf.backfill(days=5, end_date_str='20260515', sleep_between=0)
+    assert len(r['written_dates']) == 4
+    assert r['failed_dates'] == ['20260514']
+    assert r['holiday_dates'] == []
 
 
 def test_backfill_default_days_is_10(monkeypatch):
@@ -74,8 +88,9 @@ def test_backfill_default_days_is_10(monkeypatch):
     monkeypatch.setattr(bf, 'fetch_t86_cached',
                         lambda d: (seen_days.append(d) or pd.DataFrame()))
     monkeypatch.setattr(bf, 'save_t86_to_history', lambda d, df: 0)
-    bf.backfill(end_date_str='20260515', sleep_between=0)
+    r = bf.backfill(end_date_str='20260515', sleep_between=0)
     assert len(seen_days) == 10
+    assert r['requested_days'] == 10
 
 
 def test_backfill_upsert_safe_repeated_calls(monkeypatch):
@@ -86,8 +101,34 @@ def test_backfill_upsert_safe_repeated_calls(monkeypatch):
                                                   '_trust': 0, '_dealer': 0}]))
     monkeypatch.setattr(bf, 'save_t86_to_history',
                         lambda d, df: (save_calls.append(d) or 1))
-    s1, _, _ = bf.backfill(days=3, end_date_str='20260515', sleep_between=0)
-    s2, _, _ = bf.backfill(days=3, end_date_str='20260515', sleep_between=0)
-    assert s1 == s2 == 3
+    r1 = bf.backfill(days=3, end_date_str='20260515', sleep_between=0)
+    r2 = bf.backfill(days=3, end_date_str='20260515', sleep_between=0)
+    assert len(r1['written_dates']) == len(r2['written_dates']) == 3
     # 同日期被呼叫兩次（重複跑不應該爆炸；UPSERT 由 SQL 端保證冪等）
     assert save_calls.count('20260515') == 2
+
+
+def test_cli_main_runs_with_default_args(monkeypatch):
+    """CLI 入口 main() 仍能跑（重構後 backfill 介面改變，CLI 要跟著對齊）。"""
+    monkeypatch.setattr(bf, 'fetch_t86_cached', lambda d: pd.DataFrame())
+    monkeypatch.setattr(bf, 'save_t86_to_history', lambda d, df: 0)
+    # 假裝沒給 args（用預設 days=10）
+    monkeypatch.setattr('sys.argv', ['backfill_t86_history'])
+    # 不要實際 setup_logging 接管 root logger
+    import logging_setup
+    monkeypatch.setattr(logging_setup, 'setup_logging', lambda: None)
+
+    rc = bf.main()
+    assert rc == 0  # 沒有失敗 → exit 0
+
+
+def test_cli_main_returns_nonzero_when_any_day_failed(monkeypatch):
+    """任何一天失敗 → main 回 exit code 非 0。"""
+    monkeypatch.setattr(bf, 'fetch_t86_cached', lambda d: None)  # 全失敗
+    monkeypatch.setattr(bf, 'save_t86_to_history', lambda d, df: 0)
+    monkeypatch.setattr('sys.argv', ['backfill_t86_history', '--days', '2'])
+    import logging_setup
+    monkeypatch.setattr(logging_setup, 'setup_logging', lambda: None)
+
+    rc = bf.main()
+    assert rc != 0

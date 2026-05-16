@@ -56,6 +56,11 @@ _COMMANDS = [
     {'name': 'challenge', 'description': '⚔️ 提交本週選股挑戰，一週後比誰獲利高',
      'options': [{'name': 'code', 'description': '你的挑戰股票代號',
                   'type': 3, 'required': True}]},
+    # ─────────── v6.2 管理員指令（owner only） ───────────
+    {'name': 'backfill', 'description': '🛠️ 手動補抓 T86 歷史（限管理員）',
+     'options': [{'name': 'days', 'description': '往回抓 N 個交易日（1~60，預設 10）',
+                  'type': 4, 'required': False}]},
+    {'name': 'health',   'description': '🩺 系統健康檢查：schema / 資料表完整性（限管理員）'},
 ]
 
 
