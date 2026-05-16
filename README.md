@@ -294,6 +294,41 @@ python -m pyflakes *.py db/*.py discord_bot/*.py tests/*.py
                           └────────────────────┘
 ```
 
+### Railway Volume（持久化 KBAR 快取，**強烈建議**）
+
+每次 `/run` 抓 30 檔 candidate 的 K 棒，每檔耗時 ~10 秒（TWSE rate
+limited）。K 棒有 disk cache（`config.KBAR_CACHE_DIR`），但 Railway 容器
+重啟 / 重 deploy 會把 `/tmp/*` 全部清空 → 每次重啟第一輪 `/run` 都得從
+頭抓，整個 30 檔 ~5 分鐘。
+
+**修法**：掛一個 Railway Volume 把 cache 目錄移出 `/tmp`。code 端
+（`config.KBAR_CACHE_DIR`）已經是 env-driven，**不需要改 code**：
+
+1. Railway dashboard → `my_stock_bot` service → **Settings** → **Volumes** → **New Volume**
+   - Name: `kbar-cache`
+   - Mount Path: `/data/kbar_cache`
+2. 同一 service → **Variables** → 新增：
+   - `KBAR_CACHE_DIR=/data/kbar_cache`
+3. Save → 自動觸發 redeploy，Volume 永久掛載
+
+**驗證**：在 Discord 打 `/health`，「KBAR cache」欄會顯示：
+```
+路徑：/data/kbar_cache  ✅ persistent
+檔案數：N 個　目錄大小：X MB
+```
+如果看到 `⚠️ /tmp（重啟會清空）` 表示 env var 沒生效。
+
+**預期效果**（持久化後）：
+
+| 情境 | 每檔耗時 | 30 檔總時 |
+|------|---------|----------|
+| 首次 deploy / cache 全冷 | 10~12 秒 | ~5 分鐘 |
+| 隔日（~80% cache hit） | 2~3 秒 | ~1.5 分鐘 |
+| 一週後（~95% hit） | 1~2 秒 | 30~60 秒 |
+| **容器重啟後** | **1~2 秒** ✅ | **30~60 秒**（Volume 保留 cache） |
+
+容量需求極小（~100~400 MB 上限），Railway storage 費用幾乎可忽略。
+
 ---
 
 ## 重大設計決策（避免回頭走錯路）

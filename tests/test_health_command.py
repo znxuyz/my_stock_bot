@@ -65,17 +65,20 @@ def test_health_core_all_healthy(monkeypatch):
     ]
     _patch_conn(monkeypatch, fetch_map)
     monkeypatch.setattr(config, 'SCHEMA_VERSION', 'v62-pure-stalker-10pt')
+    # 給一個 persistent 路徑（非 /tmp）讓 cache field 通過
+    monkeypatch.setattr(config, 'KBAR_CACHE_DIR', '/data/kbar_cache')
 
     embed = ac.cmd_health_core(today=today)
     assert '✅' in embed['title']
     assert embed['color'] == ac._STATUS_COLOR['success']
 
-    # 4 個 fields
+    # 5 個 fields（加上 KBAR cache）
     field_names = [f['name'] for f in embed['fields']]
     assert any('SCHEMA_VERSION' in n for n in field_names)
     assert any('daily_t86_history' in n for n in field_names)
     assert any('daily_scores' in n for n in field_names)
     assert any('screen_records' in n for n in field_names)
+    assert any('KBAR cache' in n for n in field_names)
 
     # 完整性訊息應該含「完整」
     t86_field = next(f for f in embed['fields']
@@ -193,3 +196,124 @@ def test_register_includes_admin_commands():
     names = {c['name'] for c in _COMMANDS}
     assert 'backfill' in names
     assert 'health' in names
+
+
+# ─────────── KBAR cache 持久化檢查 ───────────
+
+def _all_db_present(today):
+    """產生「DB 全 OK」的 fetch_map（給只想測 cache 段的測試用）。"""
+    expected = []
+    cur = today
+    while len(expected) < 10:
+        if cur.weekday() < 5:
+            expected.append(cur)
+        cur -= timedelta(days=1)
+    return [
+        ('FROM daily_t86_history', [(d,) for d in expected]),
+        ('FROM daily_scores',       [(0,)]),
+        ('FROM screen_records',     [(0,)]),
+    ]
+
+
+def _fake_walk(walk_map):
+    """產生 os.walk 的 fake 回值：walk_map = {dir_path: [files...]}"""
+    def _walk(root):
+        files = walk_map.get(root, [])
+        yield (root, [], files)
+    return _walk
+
+
+def test_health_shows_kbar_cache_stats(monkeypatch):
+    """KBAR_CACHE_DIR 在 persistent 路徑 + 目錄有檔案 → 顯示路徑 + 檔案數 + 大小 + ✅ persistent。"""
+    persistent_path = '/data/kbar_cache'  # 非 /tmp → persistent
+    files_in_dir = ['2330_202605.json', '2317_202605.json', '1101_202605.json']
+    file_sizes = {
+        f'{persistent_path}/2330_202605.json': 1024,
+        f'{persistent_path}/2317_202605.json': 2048,
+        f'{persistent_path}/1101_202605.json': 512,
+    }
+
+    import os as _os
+    monkeypatch.setattr(_os.path, 'exists', lambda p: p == persistent_path)
+    monkeypatch.setattr(_os.path, 'isdir', lambda p: p == persistent_path)
+    monkeypatch.setattr(_os.path, 'getsize', lambda p: file_sizes.get(p, 0))
+    monkeypatch.setattr(_os, 'walk', _fake_walk({persistent_path: files_in_dir}))
+
+    today = date(2026, 5, 15)
+    _patch_conn(monkeypatch, _all_db_present(today))
+    monkeypatch.setattr(config, 'SCHEMA_VERSION', 'v62-pure-stalker-10pt')
+    monkeypatch.setattr(config, 'KBAR_CACHE_DIR', persistent_path)
+
+    embed = ac.cmd_health_core(today=today)
+    kbar_field = next(f for f in embed['fields'] if f['name'] == 'KBAR cache')
+    assert persistent_path in kbar_field['value']
+    assert '✅ persistent' in kbar_field['value']
+    assert '3' in kbar_field['value']                              # 3 個檔案
+    assert 'KB' in kbar_field['value']                             # 顯示為 KB
+    # 整體仍 ✅（cache persistent + DB 全 OK）
+    assert '✅' in embed['title']
+
+
+def test_health_warns_when_cache_in_tmp(monkeypatch):
+    """KBAR_CACHE_DIR 在 /tmp 下 → ⚠️ persistent 警告，整體標題降為 ⚠️。"""
+    tmp_cache = '/tmp/stockbot_test_kbar_cache'
+
+    import os as _os
+    # 目錄即使不存在也應該識別出 /tmp 而標 ⚠️
+    monkeypatch.setattr(_os.path, 'exists', lambda p: False)
+
+    today = date(2026, 5, 15)
+    _patch_conn(monkeypatch, _all_db_present(today))
+    monkeypatch.setattr(config, 'SCHEMA_VERSION', 'v62-pure-stalker-10pt')
+    monkeypatch.setattr(config, 'KBAR_CACHE_DIR', tmp_cache)
+
+    embed = ac.cmd_health_core(today=today)
+    kbar_field = next(f for f in embed['fields'] if f['name'] == 'KBAR cache')
+    assert '/tmp' in kbar_field['value']
+    assert '重啟會清空' in kbar_field['value']
+    # 整體標題降為 ⚠️ partial（提醒 deploy 不是 persistent）
+    assert '⚠️' in embed['title']
+
+
+def test_health_handles_missing_cache_dir(monkeypatch):
+    """KBAR_CACHE_DIR 指向不存在的 persistent 路徑 → 顯示「目錄尚未建立」+ ✅ persistent。"""
+    missing = '/data/kbar_cache_never_made'  # 不在 /tmp → persistent
+
+    import os as _os
+    monkeypatch.setattr(_os.path, 'exists', lambda p: False)
+
+    today = date(2026, 5, 15)
+    _patch_conn(monkeypatch, _all_db_present(today))
+    monkeypatch.setattr(config, 'SCHEMA_VERSION', 'v62-pure-stalker-10pt')
+    monkeypatch.setattr(config, 'KBAR_CACHE_DIR', missing)
+
+    embed = ac.cmd_health_core(today=today)
+    kbar_field = next(f for f in embed['fields'] if f['name'] == 'KBAR cache')
+    assert missing in kbar_field['value']
+    # 持久化路徑（不在 /tmp）即使目錄還不存在，也標 persistent
+    assert '✅ persistent' in kbar_field['value']
+    assert '尚未建立' in kbar_field['value']
+    # 整體仍 ✅（首次啟動時這正常）
+    assert '✅' in embed['title']
+
+
+def test_health_handles_empty_cache_dir_env(monkeypatch):
+    """KBAR_CACHE_DIR 完全未設 → 顯示「未設定」警示。"""
+    today = date(2026, 5, 15)
+    _patch_conn(monkeypatch, _all_db_present(today))
+    monkeypatch.setattr(config, 'SCHEMA_VERSION', 'v62-pure-stalker-10pt')
+    monkeypatch.setattr(config, 'KBAR_CACHE_DIR', '')
+
+    embed = ac.cmd_health_core(today=today)
+    kbar_field = next(f for f in embed['fields'] if f['name'] == 'KBAR cache')
+    assert '未設定' in kbar_field['value']
+    assert '⚠️' in embed['title']
+
+
+def test_human_bytes_formatting():
+    """_human_bytes 各量級。"""
+    assert ac._human_bytes(0) == '0 B'
+    assert ac._human_bytes(512) == '512 B'
+    assert ac._human_bytes(1024) == '1.0 KB'
+    assert ac._human_bytes(1024 * 1024) == '1.0 MB'
+    assert ac._human_bytes(1024 * 1024 * 1024) == '1.0 GB'

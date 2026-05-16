@@ -150,9 +150,75 @@ def cmd_health_core(today=None):
     sections.append({'name': f'screen_records（{today.isoformat()}）',
                      'value': sr_value, 'inline': True})
 
+    # 5. KBAR cache 持久化檢查
+    cache_value, cache_ok = _kbar_cache_status()
+    sections.append({'name': 'KBAR cache', 'value': cache_value, 'inline': False})
+    if not cache_ok:
+        # ⚠️ 不影響功能但標記黃，提醒部署不是 persistent
+        overall_ok = False
+
     title = '🩺 系統健康檢查' + (' ✅' if overall_ok else ' ⚠️')
     color = _STATUS_COLOR['success'] if overall_ok else _STATUS_COLOR['partial']
     return {'title': title, 'color': color, 'fields': sections}
+
+
+# ─────────── 內部：KBAR cache 健康檢查 ───────────
+
+def _human_bytes(n):
+    """整數位元組 → 人類可讀。"""
+    for unit in ('B', 'KB', 'MB', 'GB'):
+        if abs(n) < 1024:
+            return f'{n:.1f} {unit}' if unit != 'B' else f'{int(n)} {unit}'
+        n /= 1024
+    return f'{n:.1f} TB'
+
+
+def _kbar_cache_status():
+    """檢查 KBAR cache 目錄狀態。回 (value_str, is_persistent_bool)。
+
+    is_persistent = True 表示 cache_dir 不在 /tmp 下、跨 deploy 持久化。
+    cache_dir 不存在或無權限都會優雅 fallback 成警示訊息。
+    """
+    import os as _os
+    cache_dir = config.KBAR_CACHE_DIR or ''
+    is_persistent = bool(cache_dir) and not cache_dir.startswith('/tmp')
+
+    # 路徑存在性 / 統計
+    try:
+        if not cache_dir:
+            return ('⚠️ KBAR_CACHE_DIR 未設定', False)
+        if not _os.path.exists(cache_dir):
+            # 目錄還沒建（第一次啟動）— 不算 fail，但提示
+            marker = '✅ persistent' if is_persistent else '⚠️ /tmp（重啟會清空）'
+            return (
+                f'路徑：`{cache_dir}` {marker}\n'
+                f'狀態：目錄尚未建立（首次 /run 後會自動產生）',
+                is_persistent,
+            )
+        if not _os.path.isdir(cache_dir):
+            return (f'⚠️ `{cache_dir}` 不是目錄', False)
+
+        # 算檔案數 + 總大小
+        n_files = 0
+        total_bytes = 0
+        for root, _dirs, files in _os.walk(cache_dir):
+            n_files += len(files)
+            for f in files:
+                try:
+                    total_bytes += _os.path.getsize(_os.path.join(root, f))
+                except OSError:
+                    pass
+
+        marker = '✅ persistent' if is_persistent else '⚠️ /tmp（重啟會清空）'
+        return (
+            f'路徑：`{cache_dir}` {marker}\n'
+            f'檔案數：**{n_files:,}**　目錄大小：**{_human_bytes(total_bytes)}**',
+            is_persistent,
+        )
+    except PermissionError as e:
+        return (f'❌ 權限錯誤：`{e}`', False)
+    except Exception as e:
+        return (f'❌ 查詢失敗：`{e}`', False)
 
 
 # ─────────── 內部：DB 查詢 ───────────

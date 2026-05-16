@@ -1,5 +1,33 @@
 # Changelog
 
+## v6.2.1 — KBAR cache 持久化檢查（patch）
+
+非破壞性改動，只擴充 `/health` 健康檢查 + 增加部署文件。
+
+- `/health` Embed 新增 **KBAR cache** 欄位：
+  - 顯示 `config.KBAR_CACHE_DIR` 路徑
+  - 檔案數 + 目錄大小（人類可讀）
+  - persistent 狀態：路徑不在 `/tmp` 下標 ✅，在 `/tmp` 下標 ⚠️（重啟會清空）
+  - 目錄不存在 → 顯示「尚未建立（首次 /run 後會自動產生）」
+  - 權限錯誤 / 例外 → 標 ❌ 並顯示原因
+- 非 persistent 路徑會讓整體 `/health` 標題降為 ⚠️，提醒 deploy 設定不完整
+- 新增 README「Railway Volume（持久化 KBAR 快取）」段落：
+  完整步驟 + 預期效果表（首次 ~5 min → 一週後 30~60s）
+- 對應 pytest：`test_health_shows_kbar_cache_stats` /
+  `test_health_warns_when_cache_in_tmp` /
+  `test_health_handles_missing_cache_dir` / `test_health_handles_empty_cache_dir_env`
+  / `test_human_bytes_formatting`（共 5 個新測試）
+- `config.KBAR_CACHE_DIR` **沒改**（一直都是 env-driven），所以從 `/tmp`
+  搬到 persistent volume 是純 Railway dashboard 設定，不需要 code change
+
+部署步驟（一次性）：
+1. Railway → my_stock_bot → Settings → Volumes → New Volume
+   `name=kbar-cache, mount=/data/kbar_cache`
+2. Railway → Variables → 新增 `KBAR_CACHE_DIR=/data/kbar_cache`
+3. 自動 redeploy → `/health` 確認顯示 ✅ persistent
+
+---
+
 ## v6.2 Phase 1 — Pure Stalker + 10pt scoring + 5-tier status
 
 > ⚠️ **Breaking change**：`SCHEMA_VERSION = 'v62-pure-stalker-10pt'`，第一次啟動會
