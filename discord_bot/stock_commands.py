@@ -1,22 +1,37 @@
 """
 個股相關指令：/stock /topbuyer /topseller。
 共用 analyze_stock_data 給 Web /api/stock 用。
+v6.2：MACD (8,17,5)，v6.2 評分 + 五星推薦度（total_score / 2）。
 """
 import logging
 import time
 
 import config
+from accumulation import detect_stalker_setup
 from advanced_indicators import calc_advanced_indicators
-from chase import check_strong_chase, count_consecutive_limit_ups
-from entry_zone import calc_entry_zone
+from chase import count_consecutive_limit_ups
 from format_utils import fmt_share
 from indicators import (
-    calc_bias_and_entry, calc_macd, calc_volume_ratio, check_ema_bull,
+    calc_5d_cumulative_change,
+    calc_5d_price_range,
+    calc_bias_and_entry,
+    calc_bias_20,
+    calc_daily_amount,
+    calc_macd,
+    calc_vol_vs_60d_ratio,
+    calc_volume_ratio,
+    check_ema_bull,
+    count_limit_ups_in_window,
 )
-from scoring import calc_chip_concentration, calc_score
+from scoring import (
+    calc_chip_concentration,
+    calc_score_v62,
+    status_to_emoji,
+    status_to_position_pct,
+)
 from time_utils import get_target_date, prev_months, tw_now
 from twse_kbar import build_history_fast, fetch_stock_day_fast
-from twse_t86 import fetch_t86_cached
+from twse_t86 import fetch_t86_cached, get_inst_history
 
 logger = logging.getLogger(__name__)
 
@@ -25,16 +40,85 @@ logger = logging.getLogger(__name__)
 _STOCK_API_CACHE = {}
 
 
-def _grade_from_score(score):
-    if score >= 85: return 'SS', '🔥', '各項指標多數達標，可考慮進場布局。'
-    if score >= 68: return 'S',  '💎', '條件不錯但非最佳，小量試水溫。'
-    if score >= 52: return 'A',  '📈', '訊號普通，建議等待更明確訊號再進場。'
-    return None, '', '條件偏弱，暫時觀望。'
+def _recommend_from_total(total):
+    """v6.2 五星推薦度：total_score // 2（0~5）。"""
+    star = max(0, min(5, int(total) // 2))
+    if star >= 4: rec = '訊號強烈，已進入 ACTIVE 主進場區。'
+    elif star >= 3: rec = '累積中，可分批布局觀察。'
+    elif star >= 2: rec = '條件混雜，建議等待更明確訊號。'
+    else: rec = '條件偏弱，暫時觀望。'
+    return star, rec
+
+
+def _stalker_checklist(price, change, vol_ratio, vol60, amount, cum5d,
+                       price_range, limit_ups_10d, ema_ok, bias_pct,
+                       bias20, acc_setup):
+    """逐項回傳 (label, passed, value_str) 給 Discord 顯示。"""
+    checks = []
+    checks.append(('收盤 ≥ 10 元', price >= config.MIN_PRICE, f'{price:.2f}'))
+    checks.append((
+        f'漲幅 {config.STALKER_MIN_TODAY_CHANGE}% ~ {config.STALKER_MAX_TODAY_CHANGE}%',
+        config.STALKER_MIN_TODAY_CHANGE <= change <= config.STALKER_MAX_TODAY_CHANGE,
+        f'{change:+.2f}%',
+    ))
+    checks.append((
+        f'量比 {config.STALKER_VOL_RATIO_MIN}~{config.STALKER_VOL_RATIO_MAX}x',
+        config.STALKER_VOL_RATIO_MIN <= vol_ratio <= config.STALKER_VOL_RATIO_MAX,
+        f'{vol_ratio:.2f}x',
+    ))
+    if vol60 is not None:
+        checks.append((
+            f'量/60日 < {config.STALKER_MAX_VOL_VS_60D}',
+            vol60 < config.STALKER_MAX_VOL_VS_60D,
+            f'{vol60:.2f}x',
+        ))
+    checks.append((
+        f'日成交金額 ≥ {config.MIN_DAILY_AMOUNT/1e7:.0f}E (千萬)',
+        amount >= config.MIN_DAILY_AMOUNT,
+        f'{amount/1e8:.2f}億',
+    ))
+    if cum5d is not None:
+        checks.append((
+            f'5日累積 {config.STALKER_MIN_CUM_CHANGE}~{config.STALKER_MAX_CUM_CHANGE}%',
+            config.STALKER_MIN_CUM_CHANGE <= cum5d <= config.STALKER_MAX_CUM_CHANGE,
+            f'{cum5d:+.2f}%',
+        ))
+    if price_range is not None:
+        checks.append((
+            f'5日振幅 < {config.STALKER_MAX_PRICE_RANGE}%',
+            price_range < config.STALKER_MAX_PRICE_RANGE,
+            f'{price_range:.2f}%',
+        ))
+    checks.append((
+        '10日內漲停 = 0',
+        limit_ups_10d <= config.STALKER_MAX_LIMIT_UPS_10D,
+        f'{limit_ups_10d} 次',
+    ))
+    checks.append(('EMA 20 > 60', ema_ok, ''))
+    if bias_pct is not None:
+        checks.append((
+            f'乖離 10MA ≤ {config.STALKER_MAX_BIAS_10}%',
+            bias_pct <= config.STALKER_MAX_BIAS_10,
+            f'{bias_pct:+.2f}%',
+        ))
+    if bias20 is not None:
+        checks.append((
+            f'乖離 20MA ≤ {config.STALKER_MAX_BIAS_20}%',
+            bias20 <= config.STALKER_MAX_BIAS_20,
+            f'{bias20:+.2f}%',
+        ))
+    if acc_setup is not None:
+        checks.append((
+            f'Stalker 累積（{config.STALKER_MIN_BUY_DAYS}/{config.STALKER_DAYS} 天）',
+            acc_setup['is_stalker'],
+            f"{acc_setup['buy_days']}/{config.STALKER_DAYS}",
+        ))
+    return checks
 
 
 def analyze_stock_data(sid):
     """
-    完整個股分析（fetch K bars + 計算指標 + 評分）
+    完整個股分析（fetch K bars + 計算指標 + v6.2 評分）。
     回傳結構化 dict 供 Discord /stock 與 Web /api/stock 共用，失敗回 None。
     """
     sid = sid.strip().upper()
@@ -54,6 +138,7 @@ def analyze_stock_data(sid):
     change     = round(diff / prev_close * 100, 2) if prev_close else 0.0
     vol_ratio  = calc_volume_ratio(df_all, df_all['date'].iloc[-1])
     is_bull, ema_mode = check_ema_bull(df_all)
+    ema_ok = bool(is_bull)
 
     foreign = trust = None
     try:
@@ -69,7 +154,7 @@ def analyze_stock_data(sid):
 
     bias = calc_bias_and_entry(df_all, price)
     adv  = calc_advanced_indicators(df_all, price)
-    macd = calc_macd(df_all)
+    macd = calc_macd(df_all)  # v6.2 預設 (8,17,5)
     chip = {}
     if foreign is not None:
         vol_last = int(df_all['volume'].iloc[-1]) if not df_all.empty else 0
@@ -77,32 +162,47 @@ def analyze_stock_data(sid):
 
     consec = count_consecutive_limit_ups(df_all)
 
-    entry = {
-        'change':       change,
-        'vol_ratio':    vol_ratio,
-        'foreign':      foreign or 0,
-        'trust':        trust or 0,
-        'bias':         bias,
-        'adv':          adv,
-        'chip_score':   chip.get('score', 0),
-        'macd_score':   macd.get('macd_score', 5),
-        'market_score': 0,
-        'margin_score': 0,
-        'consec_score': 0,
+    # v6.2 額外資料
+    cum5d         = calc_5d_cumulative_change(df_all)
+    price_range   = calc_5d_price_range(df_all)
+    limit_ups_10d = count_limit_ups_in_window(df_all, window=10)
+    bias20        = calc_bias_20(df_all)
+    vol60         = calc_vol_vs_60d_ratio(df_all)
+    amount        = calc_daily_amount(df_all)
+
+    # Stalker 累積偵測（資料可能不足；不致命）
+    acc_setup = None
+    try:
+        target_date = df_all['date'].iloc[-1]
+        if hasattr(target_date, 'date'):
+            target_date = target_date.date()
+        inst_hist = get_inst_history(sid, days=config.STALKER_DAYS, end_date=target_date)
+        acc_setup = detect_stalker_setup(df_all, inst_hist)
+    except Exception as e:
+        logger.info('[/stock] %s Stalker 累積資料不足：%s', sid, e)
+        acc_setup = {
+            'is_stalker': False, 'buy_days': 0, 'cum_net': 0,
+            'cum_change_pct': None, 'price_range_pct': None,
+            'reason': 'no_history',
+        }
+
+    # v6.2 評分
+    entry_for_score = {
+        'acc_buy_days': acc_setup.get('buy_days', 0),
+        'acc_cum_net':  acc_setup.get('cum_net', 0),
+        'foreign': foreign or 0,
+        'trust':   trust or 0,
+        'cum_5d_pct': cum5d,
+        'vol_vs_60d': vol60,
+        'bias_20':    bias20,
+        'macd_info':  macd,
     }
-    score = calc_score(entry)
-    grade, grade_emoji, rec = _grade_from_score(score)
+    score_result = calc_score_v62(entry_for_score, df_all)
 
-    chase_mode  = 'normal'
-    chase_check = None
-    if consec >= 3:
-        chase = check_strong_chase(entry, macd, entry.get('market_score', 0))
-        chase_check = chase
-        if   chase['passed'] >= 5: chase_mode = 'strong_chase'
-        elif chase['passed'] >= 4: chase_mode = 'watch'
-        else:                       chase_mode = 'reject'
-
-    zone_low, zone_high = calc_entry_zone(price, chase_mode, grade=grade, precision=1)
+    star, rec = _recommend_from_total(score_result['total_score'])
+    checklist = _stalker_checklist(price, change, vol_ratio, vol60, amount,
+                                   cum5d, price_range, limit_ups_10d, ema_ok,
+                                   bias['bias_pct'] if bias else None, bias20, acc_setup)
 
     return {
         'sid':       sid,
@@ -115,21 +215,28 @@ def analyze_stock_data(sid):
         'foreign':   foreign,
         'trust':     trust,
         'bias':      bias,
+        'bias_20':   bias20,
         'adv':       {k: v for k, v in adv.items() if not callable(v)},
         'macd':      macd,
         'chip':      chip,
         'consec_limit_up': consec,
-        'chase_mode':      chase_mode,
-        'chase_check':     chase_check,
-        'entry_zone_low':  zone_low,
-        'entry_zone_high': zone_high,
-        'est_target1':     round(price * 1.05, 1),
-        'est_target2':     round(price * 1.10, 1),
-        'est_stop_loss':   round(price * 0.95, 1),
-        'score':       score,
-        'grade':       grade,
-        'grade_emoji': grade_emoji,
+        'cum_5d_pct': cum5d,
+        'vol_vs_60d': vol60,
+        'daily_amount': amount,
+        'limit_ups_10d': limit_ups_10d,
+        'price_range_5d': price_range,
+        'acc_setup': acc_setup,
+        # v6.2 評分
+        'flow_score':  score_result['flow_score'],
+        'trend_score': score_result['trend_score'],
+        'heat_score':  score_result['heat_score'],
+        'total_score': score_result['total_score'],
+        'status':      score_result['status'],
+        'status_emoji': status_to_emoji(score_result['status']),
+        'position_pct': status_to_position_pct(score_result['status']),
+        'star':        star,
         'rec':         rec,
+        'checklist':   [(name, ok, val) for name, ok, val in checklist],
         'latest_kbar_date': latest_kbar_date,
         'kbar_count':       kbar_count,
         'queried_at':       tw_now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -148,42 +255,41 @@ def format_stock_text(d):
         f"🔍 **{d['sid']}**",
         '',
         '🔹基本資料',
-        f"收盤價格：{d['price']:,.1f}　漲幅：{sign}{d['change']}%　量比：{d['vol_ratio']:.1f}x{ema_tag}",
+        f"收盤價格：{d['price']:,.2f}　漲幅：{sign}{d['change']:.2f}%　量比：{d['vol_ratio']:.2f}x{ema_tag}",
     ]
     if d['foreign'] is not None:
         lines.append(f"外資：{fmt_share(d['foreign'])} 股　投信：{fmt_share(d['trust'])} 股")
     if bias:
         sp = '+' if bias['bias_pct'] >= 0 else ''
-        lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']}%　{bias['bias_emoji']} {bias['bias_label']}")
+        lines.append(f"乖離率（10日）：{sp}{bias['bias_pct']:.2f}%　{bias['bias_emoji']} {bias['bias_label']}")
 
-    consec = d['consec_limit_up']
-    chase  = d['chase_check']
-    if d['chase_mode'] == 'strong_chase':
-        lines += ['', f'🚀強勢追漲（連續{consec}日漲停，5/5 條件達標）',
-                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元（容忍跳空 0~7%）",
-                  '➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀']
-    elif d['chase_mode'] == 'watch':
-        lines += ['', f'⚠️觀察名單（連續{consec}日漲停但僅 {chase["passed"]}/5 過）',
-                  '➡️ **不建議買進**，僅供觀察']
-        lines += [f'  {r}' for r in chase.get('reasons', [])]
-    elif d['chase_mode'] == 'reject':
-        lines += ['', f'❌連續{consec}日漲停但僅 {chase["passed"]}/5 過 — 風險過高，不推薦']
-    else:
-        gap_label = '3%' if d.get('grade') == 'SS' else '2%'
-        lines += ['', '🎯建議進場區（限價單）',
-                  f"進場區間：{d['entry_zone_low']:,.1f} ~ {d['entry_zone_high']:,.1f} 元（容忍跳空 0~{gap_label}）",
-                  '➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%',
-                  f"預估目標一：{d['est_target1']:,.1f} 元　預估目標二：{d['est_target2']:,.1f} 元　預估停損：{d['est_stop_loss']:,.1f} 元"]
+    # v6.2 Stalker 條件檢查
+    if d.get('checklist'):
+        lines += ['', '🧭 **v6.2 Stalker 條件檢查**']
+        for name, ok, val in d['checklist']:
+            mark = '✅' if ok else '❌'
+            suffix = f'（{val}）' if val else ''
+            lines.append(f'  {mark} {name}{suffix}')
 
-    if adv.get('atr_stop'):
-        lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
+    # v6.2 評分
+    lines += [
+        '',
+        f"📊 **v6.2 評分**：Flow {d['flow_score']}/5 + Trend {d['trend_score']}/3 "
+        f"+ Heat {d['heat_score']}/2 = **{d['total_score']}/10** "
+        f"({d['status_emoji']} {d['status']})",
+        f"五星推薦度：{'★' * d['star']}{'☆' * (5 - d['star'])}（{d['star']}/5）",
+        f"📝 {d['rec']}",
+        "進場：市價（T+1 開盤；一字漲停 missed）",
+        f"倉位建議：{d['position_pct']}%",
+    ]
 
+    # 輔助指標
     has_adv = any([adv.get('rsi_label'), adv.get('resistance_label'),
                    adv.get('position_label'), adv.get('obv_label'),
                    chip.get('score', 0) > 0, macd.get('macd_label')])
     if has_adv:
         lines += ['', '📊輔助數據']
-        if macd.get('macd_label'):       lines.append(f"MACD：{macd['macd_label']}")
+        if macd.get('macd_label'):       lines.append(f"MACD(8,17,5)：{macd['macd_label']}")
         if adv.get('rsi_label'):         lines.append(f"RSI：{adv['rsi_label']}")
         if adv.get('resistance_label'):  lines.append(f"壓力位：{adv['resistance_label']}")
         if adv.get('position_label'):    lines.append(f"位階：{adv['position_label']}")
@@ -191,10 +297,6 @@ def format_stock_text(d):
         if chip.get('label') and chip.get('score', 0) > 0:
             lines.append(f"籌碼：{chip['label']}")
 
-    if d['grade']:
-        lines += ['', f"{d['grade_emoji']} **【{d['grade']} {d['score']}分】**", f"📝 {d['rec']}"]
-    else:
-        lines += ['', f"📝 {d['rec']}（積分 {d['score']} 分，未達推薦門檻）"]
     return '\n'.join(lines)
 
 
@@ -232,7 +334,6 @@ def fetch_top_traders(top_type='buy', n=10):
     else:
         rows = df[df['_foreign'] < 0].sort_values('_foreign', ascending=True).head(n)
 
-    # 用 to_dict('records'):itertuples 會把底線開頭欄位改名（同 topflow.py 的雷）
     result = []
     for row_dict in rows.to_dict('records'):
         result.append({
@@ -249,7 +350,6 @@ def get_latest_price(sid):
     today_str = tw_now().strftime('%Y%m%d')
     df = fetch_stock_day_fast(sid, today_str[:6])
     if df.empty:
-        # 跨月初幾天可能本月還沒有資料 → 退一個月再試
         months = prev_months(today_str, n=2)
         if len(months) >= 2:
             df = fetch_stock_day_fast(sid, months[1])

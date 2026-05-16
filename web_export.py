@@ -63,7 +63,7 @@ def build_payloads():
     missed_hypo = db.get_missed_hypothetical_stats()
 
     stats_clean = {
-        'grade':   [_row_to_dict(r) for r in stats.get('grade',   [])],
+        'status':  [_row_to_dict(r) for r in stats.get('status',  [])],
         'bias':    [_row_to_dict(r) for r in stats.get('bias',    [])],
         'monthly': [_row_to_dict(r) for r in stats.get('monthly', [])],
     }
@@ -73,23 +73,32 @@ def build_payloads():
         'w2': [_row_to_dict(r) for r in timeline.get('w2', [])],
     }
 
+    # v6.2：依今日篩選結果計算 5 段 status 計數
+    counts = {'momentum': 0, 'active': 0, 'setup': 0, 'watch': 0, 'noise': 0}
+    for r in today_rows:
+        st = (r.get('status') or '').lower()
+        if st in counts:
+            counts[st] += 1
+    counts['total_pushed'] = counts['momentum'] + counts['active'] + counts['setup']
+
     updated_at = _tw_now_iso()
     payloads = {
         'today.json': {
             'updated_at':  updated_at,
             'screen_date': latest_date.isoformat() if latest_date else None,
             'count':       len(today_rows),
+            'counts':      counts,
             'records':     today_rows,
         },
         'stats.json': {
             'updated_at': updated_at,
             'summary':    summary_clean,
-            'by_grade':   stats_clean['grade'],
+            'counts':     counts,
+            'by_status':  stats_clean['status'],
             'by_bias':    stats_clean['bias'],
             'by_month':   stats_clean['monthly'],
             'timeline':   timeline_clean,
             # missed 假設結算：量化「保守過頭損失多少」
-            #   total / win / win_rate / avg_ret / best / worst / by_grade[]
             'missed_hypo': missed_hypo,
         },
         'history.json': {

@@ -1,7 +1,16 @@
 """
-評分相關：總分 calc_score、大盤環境、融資增幅、籌碼集中度。
+評分相關：
+  v6.2 10 分制（calc_score_v62 + 子分數 + classify_status + status_to_*）
+  v5 函式（calc_score）標 @deprecated 但保留（避免 import 鏈斷裂）
+  通用環境函式（calc_market_env / calc_margin_score / calc_chip_concentration）不動
 """
+import warnings
 
+import config
+from indicators import calc_ma_slope_5d
+
+
+# ─────────── 通用環境（保留不動） ───────────
 
 def calc_market_env(market_foreign_history):
     """
@@ -61,12 +70,149 @@ def calc_chip_concentration(foreign, trust, volume):
     return {'score': 0,     'label': f'（籌碼集中度 {conc}%）',                'concentration': conc}
 
 
+# ─────────── v6.2 10 分制評分 ───────────
+
+def calc_flow_score(entry, df_hist):
+    """Flow Score：max 5。
+
+    條件：
+      1. 過去 5 日法人連續買 = 5/5 天 → +2
+      2. 5 日累積法人淨買量 ≥ 500K 股 → +2
+      3. 籌碼集中度（外資+投信）/今日量 ≥ 10% → +1
+    """
+    score = 0
+    if int(entry.get('acc_buy_days', 0) or 0) >= 5:
+        score += 2
+    if int(entry.get('acc_cum_net', 0) or 0) >= 500_000:
+        score += 2
+
+    foreign = int(entry.get('foreign', 0) or 0)
+    trust   = int(entry.get('trust', 0) or 0)
+    vol_today = 0
+    if df_hist is not None and not df_hist.empty:
+        try:
+            vol_today = int(df_hist['volume'].iloc[-1])
+        except Exception:
+            vol_today = 0
+    if vol_today > 0:
+        conc = (max(0, foreign) + max(0, trust)) / vol_today * 100
+        if conc >= 10:
+            score += 1
+    return score
+
+
+def calc_trend_score(df_hist, entry):
+    """Trend Score：max 3。
+
+    條件：
+      1. 收盤價 > 10MA → +1
+      2. 10MA 5 日斜率 > 0（上彎）→ +1
+      3. MACD(8,17,5) DIF > DEA AND DIF > 0 → +1
+    """
+    if df_hist is None or len(df_hist) < 20:
+        return 0
+    closes = df_hist['close'].astype(float)
+    today_close = float(closes.iloc[-1])
+    ma10 = float(closes.rolling(10).mean().iloc[-1])
+
+    score = 0
+    if today_close > ma10:
+        score += 1
+
+    slope = calc_ma_slope_5d(df_hist, period=10)
+    if slope is not None and slope > 0:
+        score += 1
+
+    macd = entry.get('macd_info') or {}
+    dif = macd.get('dif')
+    dea = macd.get('dea')
+    if dif is not None and dea is not None and dif > dea and dif > 0:
+        score += 1
+    return score
+
+
+def calc_heat_score(df_hist, entry):
+    """Heat Score：max 2。Phase 1~2 用價量代理。冷門加分。
+
+    三個條件：
+      A. 5 日累積漲幅 ≤ HEAT_PROXY_CUM5D
+      B. 今日量 / 60 日均量 ≤ HEAT_PROXY_VOL60D
+      C. 乖離 20MA ≤ HEAT_PROXY_BIAS20
+
+    3/3 → +2、2/3 → +1、其餘 → 0。
+    任一項缺資料 → 0（保守）。
+    """
+    cum5d  = entry.get('cum_5d_pct')
+    vol60  = entry.get('vol_vs_60d')
+    bias20 = entry.get('bias_20')
+
+    if cum5d is None or vol60 is None or bias20 is None:
+        return 0
+
+    cond_a = cum5d  <= config.HEAT_PROXY_CUM5D
+    cond_b = vol60  <= config.HEAT_PROXY_VOL60D
+    cond_c = bias20 <= config.HEAT_PROXY_BIAS20
+
+    n = sum([cond_a, cond_b, cond_c])
+    if n == 3: return 2
+    if n == 2: return 1
+    return 0
+
+
+def classify_status(total):
+    """0-10 → 5 段分級。"""
+    if total >= config.SCORE_MOMENTUM: return 'MOMENTUM'
+    if total >= config.SCORE_ACTIVE:   return 'ACTIVE'
+    if total >= config.SCORE_SETUP:    return 'SETUP'
+    if total >= config.SCORE_WATCH:    return 'WATCH'
+    return 'NOISE'
+
+
+def status_to_emoji(status):
+    return {
+        'MOMENTUM': '🔵', 'ACTIVE': '🟢', 'SETUP': '🟡',
+        'WATCH': '🟠', 'NOISE': '🔴',
+    }.get(status, '⚪')
+
+
+def status_to_position_pct(status):
+    """v6.2 倉位建議（取代舊的 calc_position_pct）。"""
+    return {
+        'MOMENTUM': 0,   # 已啟動，不新進
+        'ACTIVE':   30,
+        'SETUP':    18,
+        'WATCH':    0,
+        'NOISE':    0,
+    }.get(status, 0)
+
+
+def calc_score_v62(entry, df_hist):
+    """v6.2 完整評分。回傳 dict 含子分數 / 總分 / 狀態。"""
+    flow  = calc_flow_score(entry, df_hist)
+    trend = calc_trend_score(df_hist, entry)
+    heat  = calc_heat_score(df_hist, entry)
+    total = flow + trend + heat
+    return {
+        'flow_score':  flow,
+        'trend_score': trend,
+        'heat_score':  heat,
+        'total_score': total,
+        'status':      classify_status(total),
+    }
+
+
+# ─────────── v5 已棄用（保留以免 import 鏈斷裂） ───────────
+
 def calc_score(entry):
+    """v5 105 分制。v6.2 起 @deprecated；本體保留給歷史相容呼叫。
+
+    新程式請改用 calc_score_v62。
     """
-    綜合積分（v4）。SS ≥ 85, S ≥ 68, A ≥ 52，其餘淘汰。
-    各 entry 期待包含 change / vol_ratio / foreign / trust / bias / adv /
-    macd_score / consec_score / market_score / margin_score / chip_score。
-    """
+    warnings.warn(
+        'scoring.calc_score is deprecated since v6.2; use calc_score_v62 instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     score = 0
 
     chg = entry.get('change', 0)
