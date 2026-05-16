@@ -109,7 +109,7 @@ def _normalise_record(e):
     return out
 
 
-def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
+def _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign):
     """v6.2 第一輪：價格 ≥ 10 元 + 漲幅 -1%~+3% + 法人單日有買（外資 OR 投信 > 0）。
 
     注意：用 to_dict('records') 而非 itertuples — 後者會把含特殊字元的欄位
@@ -161,7 +161,7 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
     return candidates
 
 
-def _enrich_candidate(entry, df_hist, target_date, inst_hist):
+def _enrich_candidate_v62(entry, df_hist, target_date, inst_hist):
     """v6.2 第二輪 11 道過濾 + 評分。任一硬條件不過回 None。"""
     sid = entry['sid']
 
@@ -381,7 +381,7 @@ def run_analysis(attempt=0, run_mode=None):
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
 
         # 第一輪
-        candidates = _filter_first_round(df, df_i, col_close, col_diff, col_sign)
+        candidates = _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign)
         logger.info('[過濾1] 基本條件通過：%d 檔', len(candidates))
 
         # v6.2 排序鍵：5 日累積法人淨買 DESC（Phase 2 起改 velocity）
@@ -431,7 +431,7 @@ def run_analysis(attempt=0, run_mode=None):
                                    idx_c + 1, len(candidates), sid, e)
                     inst_hist = []
 
-                result = _enrich_candidate(entry, df_hist, target_date, inst_hist)
+                result = _enrich_candidate_v62(entry, df_hist, target_date, inst_hist)
                 if result is not None:
                     enriched.append(result)
                     logger.info(

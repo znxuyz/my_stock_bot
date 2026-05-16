@@ -1,11 +1,11 @@
-"""v6.2 第一輪篩選 _filter_first_round 的 regression test。
+"""v6.2 第一輪篩選 _filter_first_round_v62 的 regression test。
 
 關鍵 regression：欄位名含特殊字元（'漲跌(+/-)'）時不應全部 KeyError。
 v6.2 規則：收盤 ≥ 10、漲幅 -1%~+3%、外資 OR 投信 > 0。
 """
 import pandas as pd
 
-from analysis import _filter_first_round
+from analysis import _filter_first_round_v62
 
 
 def _make_df_rows(rows):
@@ -30,7 +30,7 @@ def test_filter_first_round_handles_special_column_names():
     ]
     df = _make_df_rows(rows)
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    candidates = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    candidates = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     sids = sorted(c['sid'] for c in candidates)
     assert sids == ['2317', '2330'], f'expected [2317, 2330], got {sids}'
 
@@ -43,7 +43,7 @@ def test_v62_filters_high_gainers():
         '_foreign': 100000, '_trust': 100000,
     }])
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    cands = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    cands = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     assert cands == []
 
 
@@ -55,7 +55,7 @@ def test_v62_filters_strong_dippers():
         '_foreign': 100000, '_trust': 100000,
     }])
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    cands = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    cands = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     assert cands == []
 
 
@@ -67,7 +67,7 @@ def test_v62_accepts_small_dip():
         '_foreign': 100000, '_trust': 0,
     }])
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    cands = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    cands = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     assert [c['sid'] for c in cands] == ['2330']
 
 
@@ -79,7 +79,7 @@ def test_filter_first_round_low_price_filtered():
         '_foreign': 100000, '_trust': 100000,
     }])
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    cands = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    cands = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     assert cands == []
 
 
@@ -91,5 +91,5 @@ def test_filter_first_round_zero_institutional_filtered():
         '_foreign': 0, '_trust': 0,
     }])
     df_i = df[['sid_clean', '_foreign', '_trust']]
-    cands = _filter_first_round(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
+    cands = _filter_first_round_v62(df, df_i, '收盤價', '漲跌價差', '漲跌(+/-)')
     assert cands == []

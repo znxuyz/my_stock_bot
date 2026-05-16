@@ -1,13 +1,13 @@
-"""v6.2 Stalker 全 12 道過濾 regression（_enrich_candidate）。
+"""v6.2 Stalker 全 12 道過濾 regression（_enrich_candidate_v62）。
 
-每個測試構造一筆會在某一道被擋下的 candidate，確認 _enrich_candidate 回 None。
+每個測試構造一筆會在某一道被擋下的 candidate，確認 _enrich_candidate_v62 回 None。
 最後一個測試構造一筆全過的 candidate，確認回 dict 且分數合理。
 """
 from datetime import date, timedelta
 
 import pandas as pd
 
-from analysis import _enrich_candidate
+from analysis import _enrich_candidate_v62
 
 
 TARGET_DATE = date(2025, 3, 31)
@@ -76,7 +76,7 @@ def test_filter_vol_ratio_too_high():
     entry, df, inst = _good_setup()
     # 改最後一筆 volume 讓量比 > 1.8（前 5 天均 13_000，所以最後一筆 = 30_000 → 量比 ~2.3）
     df.loc[df.index[-1], 'volume'] = 30_000
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_vol_ratio_too_low():
@@ -84,7 +84,7 @@ def test_filter_vol_ratio_too_low():
     entry, df, inst = _good_setup()
     # 最後一筆 = 5000 → 比前 5 日均 13_000 還低
     df.loc[df.index[-1], 'volume'] = 5_000
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_vol_vs_60d_too_high():
@@ -92,7 +92,7 @@ def test_filter_vol_vs_60d_too_high():
     entry, df, inst = _good_setup()
     # 前 75 天 vol=10_000、後 5 天 vol=13_000；最後一筆改 25_000 → 60 日均 ~10500，比 2.38x
     df.loc[df.index[-1], 'volume'] = 25_000
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_amount_too_low():
@@ -102,7 +102,7 @@ def test_filter_amount_too_low():
     df['close'] = 3.0
     df.loc[df.index[-1], 'volume'] = 13_000
     entry['price'] = 3.0
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_cum_5d_too_high():
@@ -110,7 +110,7 @@ def test_filter_cum_5d_too_high():
     entry, df, inst = _good_setup()
     # 把第 -6 筆設成 90.0、最後一筆 100 → +11.1%
     df.loc[df.index[-6], 'close'] = 90.0
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_price_range_too_wide():
@@ -120,7 +120,7 @@ def test_filter_price_range_too_wide():
     last5_idx = df.index[-5:]
     df.loc[last5_idx[2], 'high'] = 110.0
     df.loc[last5_idx[3], 'low'] = 95.0
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_limit_ups_in_10d():
@@ -128,7 +128,7 @@ def test_filter_limit_ups_in_10d():
     entry, df, inst = _good_setup()
     # 在 -8 筆製造一日漲停（前一日 close × 1.10）
     df.loc[df.index[-8], 'close'] = float(df['close'].iloc[-9]) * 1.10
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_ema_not_bullish():
@@ -139,7 +139,7 @@ def test_filter_ema_not_bullish():
     df['close'] = closes
     df['high'] = [c + 0.3 for c in closes]
     df['low']  = [c - 0.3 for c in closes]
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_bias_10_too_high():
@@ -148,7 +148,7 @@ def test_filter_bias_10_too_high():
     # 把最後一天 close 改成遠高於 10MA
     df.loc[df.index[-1], 'close'] = 115.0
     entry['price'] = 115.0
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_bias_20_too_high():
@@ -163,21 +163,21 @@ def test_filter_bias_20_too_high():
         df.loc[df.index[i], 'close'] = 90.0
     # 今收 ~101，MA20 因為包含這 10 筆 90 + 10 筆 ~100 ≈ 95；bias = (101-95)/95 ≈ 6.3%
     # bias_10 = MA10 用最近 10 筆 ~100，bias 約 +1%（過得了 bias_10 ≤ 5%）
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 def test_filter_acc_3_of_5_fails_stalker():
     """法人 3/5 天買 → Stalker 不通過 → 擋下。"""
     entry, df, inst = _good_setup()
     inst = _make_inst([100_000, -50_000, 100_000, -100_000, 100_000])  # 3/5
-    assert _enrich_candidate(entry, df, TARGET_DATE, inst) is None
+    assert _enrich_candidate_v62(entry, df, TARGET_DATE, inst) is None
 
 
 # ─────────── 完整通過 ───────────
 
 def test_full_pass_returns_enriched_with_score():
     entry, df, inst = _good_setup()
-    result = _enrich_candidate(entry, df, TARGET_DATE, inst)
+    result = _enrich_candidate_v62(entry, df, TARGET_DATE, inst)
     assert result is not None, '理想的 setup 應該通過所有 12 道過濾'
     # 應該有完整 v6.2 評分欄
     assert 'flow_score'  in result and 0 <= result['flow_score']  <= 5

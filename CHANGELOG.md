@@ -4,6 +4,25 @@
 
 > ⚠️ **Breaking change**：`SCHEMA_VERSION = 'v62-pure-stalker-10pt'`，第一次啟動會
 > `DROP screen_records` 並重建。v5 累積的篩選 / 結算 / 勝率資料會永久消失。
+> 首次部署後 `daily_t86_history` 需累積 5 個交易日 Stalker 才會出現訊號，
+> 第一週可能 0 標的，這是預期行為。
+
+### Breaking changes 一覽
+
+- **DB schema**：`SCHEMA_VERSION` 升到 `v62-pure-stalker-10pt`，`screen_records`
+  DROP 重建，欄位由 v5 的 grade / score / chase_mode / entry_zone_* …
+  改為 v6.2 的 flow_score / trend_score / heat_score / total_score / status /
+  acc_buy_days / acc_cum_net / cum_5d_pct / bias_20 / vol_vs_60d / atr14 / exit_reason …
+- **評分制**：v5 的 100+ 分制（calc_score）→ v6.2 的 10 分制
+  （Flow 5 + Trend 3 + Heat 2 = total 0~10）
+- **等級制**：v5 的 SS / S / A 三級 → v6.2 的五段
+  MOMENTUM / ACTIVE / SETUP / WATCH / NOISE
+- **MACD 參數**：v5 的 (12, 26, 9) → v6.2 的 (8, 17, 5)，全面替換包括 `/stock` 個股查詢
+- **CHASE / WATCH 路徑**：v5 的「強勢追漲」與「觀察」分支全部移除；
+  `chase.check_strong_chase` 仍保留簽名但永遠回 `passed=0`（標 @deprecated）
+- **進場機制**：v5 的限價進場區間 → v6.2 的純市價
+  （T+1 開盤直接 filled，一字漲停 / 跌停 missed）；
+  `entry_zone.calc_entry_zone` 永遠回 `(None, None)`
 
 ### Strategy（內核）
 
