@@ -1,7 +1,9 @@
 """
 T+1 撮合 + 結算寫入。
-calc_position_pct / next_friday 也放這裡（給 screens 用）。
+v6.2：T+1 純市價成交（一字漲跌停 missed）。
+ATR 停損 / 移動停利 / 時間停損 / OVERHEAT 出場留待 Phase 2。
 """
+import warnings
 from datetime import timedelta
 
 from psycopg2.extras import RealDictCursor
@@ -10,7 +12,7 @@ from db.conn import get_conn
 
 
 def next_friday(from_date, n=1):
-    """從 from_date 往後找第 n 個週五"""
+    """從 from_date 往後找第 n 個週五。"""
     d, cnt = from_date, 0
     while True:
         d += timedelta(days=1)
@@ -20,53 +22,50 @@ def next_friday(from_date, n=1):
                 return d
 
 
-def calc_position_pct(grade, bias_pct):
-    """各等級在不同乖離率區間建議的倉位百分比。"""
-    if grade == 'SS':
-        if bias_pct is None or bias_pct <= 5: return 25.0
-        if bias_pct <= 8:                      return 15.0
-        return 0.0
-    if grade == 'S':
-        if bias_pct is None or bias_pct <= 5: return 15.0
-        if bias_pct <= 8:                      return 10.0
-        return 0.0
-    if grade in ('A', 'X'):
-        if bias_pct is None or bias_pct <= 5: return 10.0
-        if bias_pct <= 8:                      return 5.0
-        return 0.0
+def calc_position_pct(grade, bias_pct):  # noqa: ARG001
+    """v5 等級制倉位。v6.2 起 @deprecated，新程式改用 status_to_position_pct。
+
+    保留簽名給少數仍引用的舊測試 / 文件用，永遠回 0.0。
+    """
+    warnings.warn(
+        'db.settle.calc_position_pct is deprecated since v6.2; '
+        'use scoring.status_to_position_pct instead.',
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return 0.0
 
 
-def determine_t1_fill(t1_open, t1_high, t1_low, zone_low, zone_high, allow_gap_down=True):
+def determine_t1_fill(t1_open, t1_high, t1_low,
+                      zone_low=None, zone_high=None,  # noqa: ARG001  (v5 簽名相容)
+                      allow_gap_down=True,            # noqa: ARG001
+                      **kwargs):                       # noqa: ARG001
+    """v6.2：T+1 純市價成交。
+
+      - t1_open is None              → missed
+      - 一字漲停 / 跌停（high == low == open）→ missed
+      - 其他                         → ('filled', round(open, 2))
+
+    舊的 zone_low/zone_high/allow_gap_down 參數保留簽名但忽略，方便逐步移除呼叫端。
     """
-    根據 T+1 K 棒 + 進場區間判定撮合結果。
-    回傳 (status, fill_price)：('filled', price) 或 ('missed', None)
-      A. 開盤在區間內       → 開盤價成交
-      B. 開盤跳空高於區間   → 若盤中 low ≤ zone_high 以 zone_high 成交，否則 missed
-      C. 開盤跳空低於區間   → allow_gap_down=True 用開盤價撿便宜；False 直接 missed
-    """
-    if zone_low is None or zone_high is None or t1_open is None:
+    if t1_open is None:
         return 'missed', None
-    o  = float(t1_open)
-    lo = float(t1_low) if t1_low is not None else o
-    zl = float(zone_low)
-    zh = float(zone_high)
-    if zl <= o <= zh:
-        return 'filled', round(o, 2)
-    if o > zh:
-        if lo <= zh:
-            return 'filled', round(zh, 2)
-        return 'missed', None
-    return ('filled', round(o, 2)) if allow_gap_down else ('missed', None)
+    o = float(t1_open)
+    if t1_high is not None and t1_low is not None:
+        hi = float(t1_high)
+        lo = float(t1_low)
+        # 一字（漲停或跌停開盤即鎖死）
+        if abs(hi - o) < 1e-9 and abs(lo - o) < 1e-9:
+            return 'missed', None
+    return 'filled', round(o, 2)
 
 
 def fill_t1_entry(record_id, t1_date, status, entry_price, t1_open=None):
-    """
-    寫入 T+1 撮合結果。
-      filled：寫入 actual_entry_price + 三個目標停損（× 1.05/1.10/0.95）
-      missed：只寫日期 + fill_status
-    無論 filled / missed，t1_open_price 都會寫入（給「missed 假設有買到」分析用）。
-    若呼叫端沒傳 t1_open，會回退用 entry_price（filled 場景）。
+    """寫入 T+1 撮合結果。
+
+    filled：寫入 actual_entry_price + 三個目標停損（× 1.05 / 1.10 / 0.95；
+            Phase 2 起改為 ATR-based，這裡先沿用固定倍率作為佔位）。
+    missed：只寫日期 + fill_status。
     """
     open_price = float(t1_open) if t1_open is not None else (
         float(entry_price) if entry_price is not None else None
@@ -102,14 +101,10 @@ def fill_t1_entry(record_id, t1_date, status, entry_price, t1_open=None):
 
 
 def get_missed_for_hypothetical(settle_date, guild_id):
-    """
-    撈出 settle1_date = settle_date 且 fill_status = 'missed'
-    且還沒算過假設結算（missed_settle1_pct IS NULL）的紀錄。
-    給 settle_weekly 補算「如果有買到的話會賺多少」用。
-    """
+    """撈 settle1_date = settle_date 且 fill_status='missed' 且尚未補算者。"""
     sql = """
-    SELECT id, sid, name, grade, screen_date, actual_entry_date,
-           t1_open_price, close_price, settle1_date, position_pct
+    SELECT id, sid, name, screen_date, actual_entry_date,
+           t1_open_price, close_price, settle1_date, total_score, status
     FROM screen_records
     WHERE guild_id = %s AND settle1_date = %s AND fill_status = 'missed'
       AND missed_settle1_pct IS NULL AND t1_open_price IS NOT NULL
@@ -121,10 +116,7 @@ def get_missed_for_hypothetical(settle_date, guild_id):
 
 
 def update_missed_hypothetical(record_id, settle_close, settle_pct):
-    """
-    寫入 missed 紀錄的「假設有買到」結算結果。
-    不動 fill_status / settle1_done（避免影響真實勝率統計）。
-    """
+    """寫入 missed 紀錄的「假設有買到」結算結果。"""
     sql = """
     UPDATE screen_records SET
         missed_settle1_close = %s,

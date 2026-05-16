@@ -1,58 +1,34 @@
-"""進場區間 calc_entry_zone 測試。"""
+"""進場區間 calc_entry_zone 測試（v6.2 純市價）。
+
+v5 的限價區間 / 強勢追漲區間 / WATCH 三種模式都已移除，
+calc_entry_zone 永遠回 (None, None)。
+"""
 from entry_zone import calc_entry_zone
 
 
-def test_normal_non_ss_uses_2_percent_ceiling():
-    """v5：非 SS 級的 normal mode 上緣放寬到 1.02。"""
-    lo, hi = calc_entry_zone(100, 'normal', grade='A')
-    assert lo == 97.0
-    assert hi == 102.0
+def test_returns_none_for_default():
+    assert calc_entry_zone(100) == (None, None)
 
 
-def test_normal_ss_uses_3_percent_ceiling():
-    """SS 級單獨放寬到 1.03。"""
-    lo, hi = calc_entry_zone(100, 'normal', grade='SS')
-    assert lo == 97.0
-    assert hi == 103.0
+def test_returns_none_for_legacy_normal_a():
+    assert calc_entry_zone(100, 'normal', grade='A') == (None, None)
 
 
-def test_normal_s_grade_treated_as_other():
-    """S 級用一般 normal 區間。"""
-    lo, hi = calc_entry_zone(100, 'normal', grade='S')
-    assert (lo, hi) == (97.0, 102.0)
+def test_returns_none_for_legacy_normal_ss():
+    assert calc_entry_zone(100, 'normal', grade='SS') == (None, None)
 
 
-def test_normal_no_grade_treated_as_other():
-    """grade=None（個股查詢未達等級）也用一般 normal。"""
-    lo, hi = calc_entry_zone(100, 'normal', grade=None)
-    assert (lo, hi) == (97.0, 102.0)
+def test_returns_none_for_legacy_strong_chase():
+    assert calc_entry_zone(100, 'strong_chase', grade='SS') == (None, None)
 
 
-def test_strong_chase_unchanged():
-    """強勢追漲與等級無關，永遠 [1.00, 1.07]。"""
-    assert calc_entry_zone(100, 'strong_chase', grade='A')  == (100.0, 107.0)
-    assert calc_entry_zone(100, 'strong_chase', grade='SS') == (100.0, 107.0)
-
-
-def test_watch_returns_none():
+def test_returns_none_for_legacy_watch():
     assert calc_entry_zone(100, 'watch') == (None, None)
 
 
-def test_reject_returns_none():
-    """reject 模式（連漲停但條件不夠）也不撮合。"""
+def test_returns_none_for_legacy_reject():
     assert calc_entry_zone(100, 'reject') == (None, None)
 
 
-def test_precision_param():
-    """precision=1 給 UI 顯示用。"""
-    lo, hi = calc_entry_zone(123.45, 'normal', grade='A', precision=1)
-    assert lo == 119.7
-    assert hi == 125.9
-
-
-def test_real_world_close():
-    """真實場景：close=342.5（dashboard 截圖中的最高那檔）"""
-    lo, hi = calc_entry_zone(342.5, 'normal', grade='A')
-    # v5: 332.23 ~ 349.35
-    assert lo == 332.22 or lo == 332.23
-    assert abs(hi - 349.35) < 0.05
+def test_returns_none_regardless_of_precision():
+    assert calc_entry_zone(123.45, 'normal', grade='A', precision=1) == (None, None)

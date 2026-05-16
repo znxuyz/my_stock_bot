@@ -74,12 +74,12 @@
   .neu{color:var(--muted)}
 
   .pill{display:inline-block;padding:2px 8px;border-radius:10px;font-size:0.6875rem;font-weight:600}
-  .grade-SS{background:#bc8cff33;color:#d2b8ff;border:1px solid #bc8cff66}
-  .grade-S {background:#58a6ff33;color:#79c0ff;border:1px solid #58a6ff66}
-  .grade-A {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
-  .grade-X {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
-  .grade-CHASE{background:#f8514933;color:#ffa198;border:1px solid #f8514966}
-  .grade-WATCH{background:#d2992233;color:#f0c674;border:1px solid #d2992266}
+  /* v6.2 status pills */
+  .status-MOMENTUM{background:#58a6ff33;color:#79c0ff;border:1px solid #58a6ff66}
+  .status-ACTIVE  {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
+  .status-SETUP   {background:#d2992233;color:#f0c674;border:1px solid #d2992266}
+  .status-WATCH   {background:#f0883e33;color:#ffa657;border:1px solid #f0883e66}
+  .status-NOISE   {background:#f8514933;color:#ffa198;border:1px solid #f8514966}
   .fill-filled  {background:#3fb95033;color:#7ee787;border:1px solid #3fb95066}
   .fill-missed  {background:#f8514933;color:#ffa198;border:1px solid #f8514966}
   .fill-pending {background:#8b949e33;color:#c9d1d9;border:1px solid #8b949e66}
@@ -216,7 +216,7 @@
 </head>
 <body>
 <header>
-  <h1>📈 台股量化戰報 <small>Dashboard v3 · 進場區間 + 雙勝率</small></h1>
+  <h1>📈 台股量化戰報 <small>Dashboard v6.2 · 純 Stalker + 10 分制 + 5 段分級</small></h1>
   <div>
     <span id="updated" class="updated">載入中…</span>
     <button class="btn" onclick="reloadAll()" style="margin-left:10px">🔄 重新整理</button>
@@ -239,22 +239,24 @@
         <h2 style="margin:0;flex:1">本日篩選結果 <span id="today-date" class="updated"></span></h2>
         <input type="search" id="today-search" placeholder="搜尋代號或名稱…" oninput="renderToday()">
         <select id="today-grade" onchange="renderToday()">
-          <option value="">全部等級</option>
-          <option>SS</option><option>S</option><option>A</option>
-          <option value="CHASE">🚀 強勢追漲</option><option value="WATCH">⚠️ 觀察</option>
+          <option value="">全部狀態</option>
+          <option value="MOMENTUM">🔵 MOMENTUM</option>
+          <option value="ACTIVE">🟢 ACTIVE</option>
+          <option value="SETUP">🟡 SETUP</option>
         </select>
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>等級</th><th class="num">分數</th>
+          <th>狀態</th><th class="num">分數</th>
           <th>代號</th><th>名稱</th>
-          <th>模式</th>
-          <th class="num">收盤</th><th class="num">漲幅</th><th class="num">量比</th>
-          <th class="num">乖離</th>
-          <th class="num">建議進場區</th>
+          <th>累積</th>
+          <th class="num">收盤</th><th class="num">5日漲幅</th>
+          <th class="num">量比 / 60日</th>
+          <th class="num">乖離20MA</th>
+          <th>進場</th>
           <th>T+1 撮合</th>
           <th class="num">實際進場</th>
-          <th class="num">目標+5%</th><th class="num">目標+10%</th><th class="num">停損-5%</th>
+          <th class="num">出場原因</th>
           <th class="num">建議倉位</th>
         </tr></thead>
         <tbody id="today-tbody"></tbody>
@@ -283,15 +285,17 @@
           <option value="stop">觸停損</option>
         </select>
         <select id="status-grade" onchange="renderStatus()">
-          <option value="">全部等級</option>
-          <option>SS</option><option>S</option><option>A</option>
+          <option value="">全部狀態</option>
+          <option value="MOMENTUM">🔵 MOMENTUM</option>
+          <option value="ACTIVE">🟢 ACTIVE</option>
+          <option value="SETUP">🟡 SETUP</option>
         </select>
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>篩選日</th><th>等級</th><th>代號</th><th>名稱</th>
+          <th>篩選日</th><th>狀態</th><th>代號</th><th>名稱</th>
           <th class="num">當日收盤</th>
-          <th class="num">建議進場區</th>
+          <th>進場</th>
           <th>T+1 撮合</th>
           <th class="num">實際進場</th>
           <th class="num">目標一</th><th class="num">目標二</th><th class="num">停損</th>
@@ -323,10 +327,10 @@
     </div>
     <div class="grid grid-2">
       <div class="panel">
-        <h2>依等級勝率（進場率 + 賺錢勝率）</h2>
+        <h2>依狀態勝率（進場率 + 賺錢勝率）</h2>
         <div class="scroll"><table>
           <thead><tr>
-            <th>等級</th><th class="num">總篩選</th>
+            <th>狀態</th><th class="num">總篩選</th>
             <th class="num">進場率</th>
             <th class="num">1週賺錢勝率</th><th class="num">1週均報酬</th>
             <th class="num">2週賺錢勝率</th><th class="num">2週均報酬</th>
@@ -336,7 +340,7 @@
         </table></div>
       </div>
       <div class="panel">
-        <h2>依乖離率分組</h2>
+        <h2>依乖離率（20MA）分組</h2>
         <div class="scroll"><table>
           <thead><tr>
             <th>區間</th><th class="num">樣本</th>
@@ -366,8 +370,10 @@
         <input type="search" id="history-search" placeholder="搜尋代號或名稱…" oninput="renderHistory()">
         <input type="date" id="history-date" onchange="renderHistory()">
         <select id="history-grade" onchange="renderHistory()">
-          <option value="">全部等級</option>
-          <option>SS</option><option>S</option><option>A</option>
+          <option value="">全部狀態</option>
+          <option value="MOMENTUM">🔵 MOMENTUM</option>
+          <option value="ACTIVE">🟢 ACTIVE</option>
+          <option value="SETUP">🟡 SETUP</option>
         </select>
         <select id="history-fill" onchange="renderHistory()">
           <option value="">全部撮合狀態</option>
@@ -378,9 +384,9 @@
       </div>
       <div class="scroll"><table>
         <thead><tr>
-          <th>篩選日</th><th>等級</th><th class="num">分數</th>
+          <th>篩選日</th><th>狀態</th><th class="num">分數</th>
           <th>代號</th><th>名稱</th>
-          <th class="num">收盤</th><th class="num">漲幅</th><th class="num">乖離</th>
+          <th class="num">收盤</th><th class="num">5日漲幅</th><th class="num">乖離20MA</th>
           <th>T+1 撮合</th><th class="num">實際進場</th>
           <th class="num">1週</th><th class="num">2週</th><th>結算結果</th>
         </tr></thead>
@@ -507,21 +513,23 @@ function fmtPct(n, sign=true){
   return s + v.toFixed(2) + '%';
 }
 function clsPct(n){ if(n===null||n===undefined||n==='') return 'neu'; const v=Number(n); return v>0?'pos':v<0?'neg':'neu'; }
-function gradePill(g){ return `<span class="pill grade-${g}">${g||'-'}</span>`; }
+const STATUS_EMOJI = {MOMENTUM:'🔵', ACTIVE:'🟢', SETUP:'🟡', WATCH:'🟠', NOISE:'🔴'};
+function statusPill(st){
+  if(!st) return '-';
+  const e = STATUS_EMOJI[st] || '';
+  return `<span class="pill status-${st}">${e} ${st}</span>`;
+}
 function fillPill(s){
   if(s==='filled') return '<span class="pill fill-filled">✅進場</span>';
   if(s==='missed') return '<span class="pill fill-missed">❌未進場</span>';
-  if(s==='watch')  return '<span class="pill fill-watch">⚠️觀察</span>';
   return '<span class="pill fill-pending">⏳待撮合</span>';
 }
-function modePill(m, consec){
-  if(m==='strong_chase') return `<span class="pill mode-strong">🚀 追漲 (${consec||0})</span>`;
-  if(m==='watch')        return `<span class="pill mode-watch">⚠️ 觀察 (${consec||0})</span>`;
-  return '';
+function accPill(days){
+  if(days==null) return '-';
+  return `<span class="pill" style="background:#8b949e33;color:#c9d1d9">${days}/5</span>`;
 }
-function zone(lo, hi){
-  if(lo===null||hi===null) return '-';
-  return `${fmt(lo,1)} ~ ${fmt(hi,1)}`;
+function entryPill(){
+  return '<span class="pill" style="background:#8b949e33;color:#c9d1d9">市價</span>';
 }
 
 function statusOf(rec){
@@ -574,50 +582,54 @@ document.querySelectorAll('.tab').forEach(btn=>{
   });
 });
 
+const POS_PCT = {MOMENTUM:0, ACTIVE:30, SETUP:18, WATCH:0, NOISE:0};
 function renderToday(){
   const data = STATE.today;
   const tbody = document.getElementById('today-tbody');
   const sumDiv = document.getElementById('today-summary');
-  if(!data){ tbody.innerHTML='<tr><td colspan="16" class="empty">尚無資料</td></tr>'; sumDiv.innerHTML=''; return; }
+  if(!data){ tbody.innerHTML='<tr><td colspan="14" class="empty">尚無資料</td></tr>'; sumDiv.innerHTML=''; return; }
   document.getElementById('today-date').textContent = data.screen_date ? '（'+data.screen_date+'）' : '';
   const recs = data.records || [];
-  const counts = {SS:0,S:0,A:0};
-  recs.forEach(r=>{ if(counts[r.grade]!==undefined) counts[r.grade]++; });
+  const counts = data.counts || {momentum:0, active:0, setup:0, watch:0, noise:0};
+  // grid 改 5 卡
+  sumDiv.className = 'grid';
+  sumDiv.style.gridTemplateColumns = 'repeat(5, 1fr)';
   sumDiv.innerHTML = `
-    <div class="stat"><div class="label">總篩選數</div><div class="value">${recs.length}</div></div>
-    <div class="stat"><div class="label">SS 級</div><div class="value" style="color:#d2b8ff">${counts.SS}</div></div>
-    <div class="stat"><div class="label">S 級</div><div class="value" style="color:#79c0ff">${counts.S}</div></div>
-    <div class="stat"><div class="label">A 級</div><div class="value" style="color:#7ee787">${counts.A}</div></div>
+    <div class="stat"><div class="label">🔵 MOMENTUM</div><div class="value" style="color:#79c0ff">${counts.momentum||0}</div></div>
+    <div class="stat"><div class="label">🟢 ACTIVE</div><div class="value" style="color:#7ee787">${counts.active||0}</div></div>
+    <div class="stat"><div class="label">🟡 SETUP</div><div class="value" style="color:#f0c674">${counts.setup||0}</div></div>
+    <div class="stat"><div class="label">🟠 WATCH</div><div class="value" style="color:#ffa657">${counts.watch||0}</div></div>
+    <div class="stat"><div class="label">🔴 NOISE</div><div class="value" style="color:#ffa198">${counts.noise||0}</div></div>
   `;
   const q = (document.getElementById('today-search').value||'').toLowerCase().trim();
   const g = document.getElementById('today-grade').value;
-  const filtered = recs.filter(r=>{
-    if(g && r.grade!==g) return false;
+  // 預設只顯示 SETUP+
+  const visible = recs.filter(r => ['MOMENTUM','ACTIVE','SETUP'].includes(r.status));
+  const filtered = visible.filter(r=>{
+    if(g && r.status!==g) return false;
     if(q){
       const txt = (r.sid+' '+r.name).toLowerCase();
       if(!txt.includes(q)) return false;
     }
     return true;
   });
-  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="16" class="empty">無符合條件的股票</td></tr>'; return; }
+  if(!filtered.length){ tbody.innerHTML='<tr><td colspan="14" class="empty">今日無符合 v6.2 Stalker 條件之標的（這是 feature）</td></tr>'; return; }
   tbody.innerHTML = filtered.map(r=>`
     <tr>
-      <td>${gradePill(r.grade)}</td>
-      <td class="num">${r.score!=null?r.score:'-'}</td>
+      <td>${statusPill(r.status)}</td>
+      <td class="num">${r.total_score!=null?r.total_score+'/10':'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>
-      <td>${modePill(r.chase_mode, r.consec_limit_up) || '<span class="neu">一般</span>'}</td>
+      <td>${accPill(r.acc_buy_days)}</td>
       <td class="num">${fmt(r.close_price)}</td>
-      <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
-      <td class="num">${fmt(r.vol_ratio,1)}x</td>
-      <td class="num ${clsPct(r.bias_pct)}">${fmtPct(r.bias_pct)}</td>
-      <td class="num">${zone(r.entry_zone_low, r.entry_zone_high)}</td>
+      <td class="num ${clsPct(r.cum_5d_pct)}">${fmtPct(r.cum_5d_pct)}</td>
+      <td class="num">${r.vol_vs_60d!=null?fmt(r.vol_vs_60d,2)+'x':'-'}</td>
+      <td class="num ${clsPct(r.bias_20)}">${fmtPct(r.bias_20)}</td>
+      <td>${entryPill()}</td>
       <td>${fillPill(r.fill_status)}</td>
       <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
-      <td class="num pos">${fmt(r.actual_target1)}</td>
-      <td class="num pos">${fmt(r.actual_target2)}</td>
-      <td class="num neg">${fmt(r.actual_stop_loss)}</td>
-      <td class="num">${r.position_pct?r.position_pct+'%':'-'}</td>
+      <td class="num">${r.exit_reason||'-'}</td>
+      <td class="num">${POS_PCT[r.status]!=null?POS_PCT[r.status]+'%':'-'}</td>
     </tr>
   `).join('');
 }
@@ -632,7 +644,7 @@ function renderStatus(){
   const f = document.getElementById('status-filter').value;
   const g = document.getElementById('status-grade').value;
   const filtered = recs.filter(r=>{
-    if(g && r.grade!==g) return false;
+    if(g && r.status!==g) return false;
     if(fs && r.fill_status!==fs) return false;
     if(q){
       const txt = (r.sid+' '+r.name).toLowerCase();
@@ -650,11 +662,11 @@ function renderStatus(){
     return `
       <tr>
         <td>${r.screen_date||''}</td>
-        <td>${gradePill(r.grade)}</td>
+        <td>${statusPill(r.status)}</td>
         <td><b>${r.sid}</b></td>
         <td>${r.name||''}</td>
         <td class="num">${fmt(r.close_price)}</td>
-        <td class="num">${zone(r.entry_zone_low, r.entry_zone_high)}</td>
+        <td>${entryPill()}</td>
         <td>${fillPill(r.fill_status)}</td>
         <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
         <td class="num pos">${fmt(r.actual_target1)}</td>
@@ -708,15 +720,15 @@ function renderStats(){
       <div class="sub">${fmtInt(s.win2||0)}/${fmtInt(s.settled2||0)}　均報酬 ${fmtPct(s.avg_ret2)}</div>
     </div>
   `;
-  const grade = data.by_grade || [];
-  gT.innerHTML = grade.length ? grade.map(r=>{
+  const statusList = data.by_status || data.by_grade || [];
+  gT.innerHTML = statusList.length ? statusList.map(r=>{
     const t=Number(r.total)||0, fi=Number(r.filled)||0, mi=Number(r.missed)||0;
     const fr = (fi+mi)>0 ? fi/(fi+mi)*100 : 0;
     const s1=Number(r.settled1)||0, s2=Number(r.settled2)||0;
     const w1=Number(r.win1)||0, w2=Number(r.win2)||0;
     const wr1=s1?w1/s1*100:0, wr2=s2?w2/s2*100:0;
     return `<tr>
-      <td>${gradePill(r.grade)}</td>
+      <td>${statusPill(r.status)}</td>
       <td class="num">${t}</td>
       <td class="num ${fr>=50?'pos':'neg'}">${fr.toFixed(1)}%<br><span class="sub">${fi}/${fi+mi}</span></td>
       <td class="num ${wr1>=50?'pos':'neg'}">${wr1.toFixed(1)}%<br><span class="sub">${w1}/${s1}</span></td>
@@ -923,7 +935,7 @@ function renderHistory(){
   const g = document.getElementById('history-grade').value;
   const fs = document.getElementById('history-fill').value;
   const filtered = recs.filter(r=>{
-    if(g && r.grade!==g) return false;
+    if(g && r.status!==g) return false;
     if(fs && r.fill_status!==fs) return false;
     if(d && r.screen_date !== d) return false;
     if(q){
@@ -935,16 +947,15 @@ function renderHistory(){
   if(!filtered.length){ tbody.innerHTML='<tr><td colspan="13" class="empty">無符合條件的紀錄</td></tr>'; return; }
   tbody.innerHTML = filtered.slice(0, 500).map(r=>{
     const st = statusOf(r);
-    const modeBadge = modePill(r.chase_mode, r.consec_limit_up);
     return `<tr>
       <td>${r.screen_date||''}</td>
-      <td>${gradePill(r.grade)} ${modeBadge}</td>
-      <td class="num">${r.score!=null?r.score:'-'}</td>
+      <td>${statusPill(r.status)}</td>
+      <td class="num">${r.total_score!=null?r.total_score+'/10':'-'}</td>
       <td><b>${r.sid}</b></td>
       <td>${r.name||''}</td>
       <td class="num">${fmt(r.close_price)}</td>
-      <td class="num ${clsPct(r.change_pct)}">${fmtPct(r.change_pct)}</td>
-      <td class="num ${clsPct(r.bias_pct)}">${fmtPct(r.bias_pct)}</td>
+      <td class="num ${clsPct(r.cum_5d_pct)}">${fmtPct(r.cum_5d_pct)}</td>
+      <td class="num ${clsPct(r.bias_20)}">${fmtPct(r.bias_20)}</td>
       <td>${fillPill(r.fill_status)}</td>
       <td class="num">${r.actual_entry_price?fmt(r.actual_entry_price):'-'}</td>
       <td class="num ${clsPct(r.settle1_pct)}">${r.settle1_done?fmtPct(r.settle1_pct):'-'}</td>
@@ -1071,35 +1082,32 @@ setInterval(loadAll, 5*60*1000);
     const sign  = d.diff >= 0 ? '+' : '';
     const chgCls = d.change > 0 ? 'pos' : d.change < 0 ? 'neg' : 'neu';
     const bias = d.bias || {}; const adv = d.adv || {}; const macd = d.macd || {}; const chip = d.chip || {};
-    const gradeBadge = d.grade
-      ? `<span class="pill grade-${d.grade}">${d.grade_emoji} ${d.grade} ${d.score}分</span>`
-      : `<span class="pill" style="background:#8b949e33;color:#c9d1d9">未達門檻 (${d.score}分)</span>`;
+    const statusBadge = d.status
+      ? `<span class="pill status-${d.status}">${d.status_emoji||''} ${d.status} ${d.total_score}/10</span>`
+      : `<span class="pill" style="background:#8b949e33;color:#c9d1d9">未評</span>`;
+    const starText = (d.star!=null)
+      ? `${'★'.repeat(d.star)}${'☆'.repeat(5-d.star)}（${d.star}/5）`
+      : '';
 
-    let chaseHtml = '';
-    if(d.chase_mode === 'strong_chase'){
-      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#f85149">
-        <h4 style="margin:0 0 6px 0;color:#ffa198">🚀 強勢追漲（連續 ${d.consec_limit_up} 日漲停，5/5 達標）</h4>
-        <p style="margin:0">進場區間：<b>${d.entry_zone_low} ~ ${d.entry_zone_high}</b> 元（容忍跳空 0~7%）</p>
-        <p style="margin:6px 0 0 0;color:var(--muted);font-size:12px">T+1 開盤在區間以開盤價買；跳空 >7% 放棄；跌破收盤不接刀</p>
-      </div>`;
-    } else if(d.chase_mode === 'watch'){
-      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#d29922">
-        <h4 style="margin:0 0 6px 0;color:#f0c674">⚠️ 觀察名單（連續 ${d.consec_limit_up} 日漲停，僅 ${d.chase_check.passed}/5 過）</h4>
-        <p style="margin:0">不建議買進，僅供觀察</p>
-        <ul style="margin:6px 0 0 0;padding-left:18px;font-size:12px">${d.chase_check.reasons.map(r=>'<li>'+r+'</li>').join('')}</ul>
-      </div>`;
-    } else if(d.chase_mode === 'reject'){
-      chaseHtml = `<div class="panel" style="margin-bottom:0;border-color:#f85149">
-        <h4 style="margin:0;color:#ffa198">❌ 連續 ${d.consec_limit_up} 日漲停但僅 ${d.chase_check.passed}/5 過 — 風險過高，不推薦</h4>
-      </div>`;
-    } else {
-      chaseHtml = `<div class="panel" style="margin-bottom:0">
-        <h4 style="margin:0 0 6px 0">🎯 建議進場區（限價單）</h4>
-        <p style="margin:0">進場區間：<b>${d.entry_zone_low} ~ ${d.entry_zone_high}</b> 元</p>
-        <p style="margin:4px 0 0 0">預估目標：<span class="pos">+${d.est_target1}</span> / <span class="pos">+${d.est_target2}</span>　預估停損：<span class="neg">${d.est_stop_loss}</span></p>
-        <p style="margin:6px 0 0 0;color:var(--muted);font-size:12px">隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5%/+10%、停損 -5%</p>
-      </div>`;
-    }
+    const checklistHtml = (d.checklist && d.checklist.length)
+      ? `<div class="panel" style="margin-bottom:0">
+          <h4 style="margin:0 0 6px 0">🧭 v6.2 Stalker 條件檢查</h4>
+          <ul style="margin:0;padding-left:18px;font-size:12px;line-height:1.7">
+            ${d.checklist.map(([name, ok, val]) =>
+              `<li>${ok ? '✅' : '❌'} ${name}${val ? `（${val}）` : ''}</li>`
+            ).join('')}
+          </ul>
+        </div>`
+      : '';
+
+    const scoreHtml = `<div class="panel" style="margin-bottom:12px">
+      <h4 style="margin:0 0 6px 0">📊 v6.2 評分</h4>
+      <p style="margin:0">Flow <b>${d.flow_score}/5</b> + Trend <b>${d.trend_score}/3</b>
+         + Heat <b>${d.heat_score}/2</b> = <b>${d.total_score}/10</b></p>
+      <p style="margin:4px 0 0 0">五星推薦度：${starText}</p>
+      <p style="margin:4px 0 0 0;color:var(--muted);font-size:12px">${d.rec||''}</p>
+      <p style="margin:6px 0 0 0">進場：${entryPill()}　倉位建議：<b>${d.position_pct||0}%</b></p>
+    </div>`;
 
     const fmtSh = n => {
       if(n===null||n===undefined) return '-';
@@ -1111,7 +1119,7 @@ setInterval(loadAll, 5*60*1000);
     };
 
     const advRows = [];
-    if(macd.macd_label) advRows.push(['MACD', macd.macd_label]);
+    if(macd.macd_label) advRows.push(['MACD(8,17,5)', macd.macd_label]);
     if(adv.rsi_label)        advRows.push(['RSI',   adv.rsi_label]);
     if(adv.resistance_label) advRows.push(['壓力位', adv.resistance_label]);
     if(adv.position_label)   advRows.push(['位階',  adv.position_label]);
@@ -1145,7 +1153,7 @@ setInterval(loadAll, 5*60*1000);
           <h3 style="margin:0;display:inline-block">${d.sid}</h3>
           ${cacheTag}${emaWarn}
         </div>
-        ${gradeBadge}
+        ${statusBadge}
       </div>
       <p style="margin:0 0 10px 0;color:var(--muted);font-size:12px">
         資料截至：<b>${dataDate}</b>　K 棒筆數：${d.kbar_count}　查詢於：${d.queried_at||''}
@@ -1156,14 +1164,15 @@ setInterval(loadAll, 5*60*1000);
         <p style="margin:0">收盤：<b>${d.price}</b>　漲幅：<span class="${chgCls}">${sign}${d.change}%</span>　量比：${d.vol_ratio}x</p>
         ${d.foreign!=null?`<p style="margin:4px 0 0 0">外資：<span class="${d.foreign>0?'pos':'neg'}">${fmtSh(d.foreign)}</span> 股　投信：<span class="${d.trust>0?'pos':d.trust<0?'neg':'neu'}">${fmtSh(d.trust)}</span> 股</p>`:''}
         ${bias.bias_pct!=null?`<p style="margin:4px 0 0 0">乖離率（10日）：<span class="${clsPct(bias.bias_pct)}">${bias.bias_pct>=0?'+':''}${bias.bias_pct}%</span> ${bias.bias_emoji||''} ${bias.bias_label||''}</p>`:''}
+        ${d.bias_20!=null?`<p style="margin:4px 0 0 0">乖離率（20日）：<span class="${clsPct(d.bias_20)}">${d.bias_20>=0?'+':''}${d.bias_20}%</span></p>`:''}
       </div>
-      ${chaseHtml}
+      ${scoreHtml}
+      ${checklistHtml}
       ${advRows.length?`
         <div class="panel" style="margin-top:12px;margin-bottom:0">
           <h4 style="margin:0 0 8px 0">📊 輔助數據</h4>
           ${advRows.map(([k,v])=>`<p style="margin:3px 0">${k}：${v}</p>`).join('')}
         </div>`:''}
-      <p style="margin:14px 0 0 0;text-align:center;color:var(--muted);font-size:12px">📝 ${d.rec}</p>
     `;
   }
 
@@ -1190,75 +1199,48 @@ setInterval(loadAll, 5*60*1000);
     }
   });
 
-  // ══════════ 策略參數一覽 ══════════
+  // ══════════ 策略參數一覽（v6.2） ══════════
   function renderParamsModal(){
     document.getElementById('params-body').innerHTML = `
-      <h4>🎯 篩選漏斗（依序執行）</h4>
+      <h4>🧭 v6.2 篩選漏斗（純 Stalker）</h4>
       <div class="kv">
-        <div class="k">第一輪</div><div>收盤 ≥ <code>10</code> 元　漲幅 ≥ <code>1%</code>　法人雙買超 <b>or</b> 單方買超 ≥ 100K 股</div>
-        <div class="k"></div><div>取法人合計買超 <b>前 30 名</b></div>
-        <div class="k">第二輪</div><div>量比 ≥ <code>1.5x</code>（當日量 ÷ 5 日均量）</div>
-        <div class="k"></div><div>EMA 多頭排列：<code>20 &gt; 60 &gt; 120</code>（資料不足 120 天用備援 <code>10 &gt; 20 &gt; 60</code>）</div>
-        <div class="k">第三輪</div><div>計算 8 項評分（見下方）</div>
+        <div class="k">第一輪</div><div>收盤 ≥ <code>10</code> 元　漲幅 <code>-1% ~ +3%</code>　外資 <b>or</b> 投信當日 &gt; 0</div>
+        <div class="k"></div><div>取「5 日累積法人淨買」<b>前 30 名</b>（Phase 2 起改 5 日分數斜率）</div>
+        <div class="k">第二輪</div><div>量比 <code>1.0~1.8x</code>　量/60日 &lt; <code>2.0</code>　日成交金額 ≥ <code>5000 萬</code></div>
+        <div class="k"></div><div>5 日累積漲幅 <code>-2%~+3%</code>　5 日振幅 &lt; <code>5%</code>　10 日內漲停 = 0</div>
+        <div class="k"></div><div>EMA <code>20 &gt; 60</code>　乖離 10MA ≤ <code>5%</code>　乖離 20MA ≤ <code>3%</code></div>
+        <div class="k"></div><div>Stalker 累積：5 日法人買 ≥ <b>4 天</b> 且累積淨買 &gt; 0</div>
       </div>
 
-      <h4>📐 評分權重（v4，總分 100+）</h4>
+      <h4>📐 v6.2 10 分制評分</h4>
       <table class="simple">
-        <thead><tr><th>項目</th><th class="num">配分</th><th>說明</th></tr></thead>
+        <thead><tr><th>類別</th><th class="num">滿分</th><th>條件</th></tr></thead>
         <tbody>
-          <tr><td>漲幅</td><td class="num">10</td><td>3~5% 滿分；&gt;7% 反而扣分（漲停難進場）</td></tr>
-          <tr><td>量比</td><td class="num">20</td><td>≥3x 滿分</td></tr>
-          <tr><td>法人買超強度</td><td class="num">20</td><td>雙買超 + 合計 ≥50 萬股 滿分</td></tr>
-          <tr><td>乖離率</td><td class="num">20</td><td>0~3% 滿分；&gt;8% 直接 0 分</td></tr>
-          <tr><td>RSI</td><td class="num">10</td><td>60~80 滿分；&gt;80 過熱扣分</td></tr>
-          <tr><td>壓力位</td><td class="num">10</td><td>無明顯壓力滿分</td></tr>
-          <tr><td>位階</td><td class="num">5</td><td>偏低滿分；高位扣分</td></tr>
-          <tr><td>MACD</td><td class="num">10</td><td>黃金交叉 +DIF&gt;0 滿分；空頭排列 0 分</td></tr>
+          <tr><td>Flow 部署</td><td class="num">5</td>
+              <td>5/5 連續買 +2、累積淨買 ≥ 500K +2、籌碼集中度 ≥ 10% +1</td></tr>
+          <tr><td>Trend 趨勢</td><td class="num">3</td>
+              <td>收盤 &gt; 10MA +1、10MA 5 日上彎 +1、MACD(8,17,5) DIF&gt;DEA AND DIF&gt;0 +1</td></tr>
+          <tr><td>Heat 熱度</td><td class="num">2</td>
+              <td>5 日漲幅 ≤ 2% / 量60日 ≤ 1.3 / 乖離20MA ≤ 2%；滿足 3 → +2、2 → +1</td></tr>
         </tbody>
       </table>
-      <p class="note">加減項：籌碼集中度 0~+8、大盤環境 +3~−5、融資增幅 +3~−8</p>
 
-      <h4>🏆 等級門檻</h4>
+      <h4>🏷 v6.2 五段分級</h4>
       <div class="kv">
-        <div class="k">SS 級</div><div>≥ <code>85</code> 分</div>
-        <div class="k">S 級</div><div>≥ <code>68</code> 分</div>
-        <div class="k">A 級</div><div>≥ <code>52</code> 分</div>
-        <div class="k">淘汰</div><div>&lt; 52 分</div>
+        <div class="k">🔵 9-10</div><div>MOMENTUM — 已啟動，不新進（持有續抱）</div>
+        <div class="k">🟢 7-8</div><div>ACTIVE — 主進場區，倉位 30%</div>
+        <div class="k">🟡 5-6</div><div>SETUP — 累積中，倉位 18%</div>
+        <div class="k">🟠 3-4</div><div>WATCH — 觀察，不交易</div>
+        <div class="k">🔴 0-2</div><div>NOISE — 不交易</div>
       </div>
+      <p class="note">Discord / Dashboard 主表只顯示 SETUP 以上；WATCH / NOISE 仍寫進 daily_scores 給「分數動能追蹤」用。</p>
 
       <h4>🎯 進場規則</h4>
       <div class="kv">
-        <div class="k">一般股</div><div>進場區間 = <code>[close × 0.97, close × 1.00]</code></div>
-        <div class="k"></div><div>T+1 觸到區間 → 成交；沒觸到 → 未進場（不計入賺錢勝率）</div>
-        <div class="k"></div><div>跳空跌破收盤 → 撿便宜成交</div>
-        <div class="k">強勢追漲</div><div>連續 ≥3 日漲停且 5 項條件全過：區間 = <code>[close × 1.00, close × 1.07]</code></div>
-        <div class="k"></div><div>跳空跌破收盤 → <b>不接刀</b>（趨勢反轉訊號）</div>
-        <div class="k">目標 / 停損</div><div><span class="pos">+5%</span> / <span class="pos">+10%</span> / <span class="neg">−5%</span>（基於實際成交價）</div>
-      </div>
-
-      <h4>🚀 強勢追漲 5 項門檻（連續 ≥3 日漲停才檢查）</h4>
-      <ol class="note" style="padding-left:20px">
-        <li>法人合計買超（外資+投信）≥ <b>200K 股</b></li>
-        <li>量比 ≥ <b>2.0x</b></li>
-        <li>籌碼集中度 ≥ <b>10%</b>（法人淨買 / 成交量）</li>
-        <li>MACD：DIF &gt; DEA 且 Histogram 擴張中</li>
-        <li>大盤環境分數 ≥ <b>0</b></li>
-      </ol>
-      <p class="note">5/5 過 → 🚀 強勢追漲；4/5 過 → ⚠️ 觀察名單（不買）；&lt;4 → 跳過</p>
-
-      <h4>📊 結算邏輯</h4>
-      <div class="kv">
-        <div class="k">第一次</div><div>實際進場日 → 下個週五（5 個交易日）</div>
-        <div class="k">第二次</div><div>實際進場日 → 再下個週五（10 個交易日）</div>
-        <div class="k">觸停損</div><div>持有期間 low ≤ 停損價 → settle_pct 強制視為 −5%</div>
-        <div class="k">觸目標</div><div>持有期間 high ≥ 目標 → 記旗標（不影響報酬，讓利潤奔跑）</div>
-        <div class="k">假日</div><div>結算日若為國定假日，自動採用最後可用交易日收盤</div>
-      </div>
-
-      <h4>📈 雙勝率指標</h4>
-      <div class="kv">
-        <div class="k">進場率</div><div><code>filled / (filled + missed)</code></div>
-        <div class="k">賺錢勝率</div><div><code>(filled & settle_pct &gt; 0) / filled</code></div>
+        <div class="k">進場</div><div>T+1 開盤<b>市價成交</b>；一字漲停 / 跌停 = missed</div>
+        <div class="k">停損</div><div>Phase 1 沿用 −5%（Phase 2 改 ATR-based，收盤判定）</div>
+        <div class="k">時間停損</div><div>Phase 2 啟用：15 個交易日未達 +5% 全出</div>
+        <div class="k">OVERHEAT 出場</div><div>Phase 2 啟用：Heat=0 且爆量長紅 → 強制全出</div>
       </div>
 
       <h4>🔄 自動排程（台灣時間）</h4>
@@ -1268,6 +1250,8 @@ setInterval(loadAll, 5*60*1000);
         <div class="k">週五 18:00</div><div>1 週 + 2 週結算</div>
         <div class="k">週五 21:00</div><div>選股挑戰結算清零</div>
       </div>
+
+      <p class="note">⚠️ v6.2 升版：DB schema 重建，v5 歷史勝率資料已清空。詳見 README / CHANGELOG。</p>
     `;
   }
 
@@ -1287,9 +1271,9 @@ setInterval(loadAll, 5*60*1000);
       <b>&gt;80</b> 過熱（短期可能拉回）；<b>60~80</b> 強勢動能（最佳）；
       <b>50~60</b> 中性偏多；<b>&lt;50</b> 弱勢。</p>
 
-      <h4>📉 MACD 指數平滑移動平均背離</h4>
-      <p class="note">由 <b>DIF = EMA(12) − EMA(26)</b> 與 <b>DEA = EMA(DIF, 9)</b> 構成。
-      Histogram = DIF − DEA 顯示動能強弱。</p>
+      <h4>📉 MACD 指數平滑移動平均背離（v6.2 改用敏感版）</h4>
+      <p class="note">由 <b>DIF = EMA(8) − EMA(17)</b> 與 <b>DEA = EMA(DIF, 5)</b> 構成。
+      Histogram = DIF − DEA 顯示動能強弱。比經典 (12,26,9) 更早抓到趨勢轉折。</p>
       <ul class="note" style="padding-left:20px">
         <li><b>DIF 上穿 DEA</b>（黃金交叉）→ 多頭轉折訊號</li>
         <li><b>DIF &gt; DEA + Hist 擴張</b> → 多頭動能加強</li>

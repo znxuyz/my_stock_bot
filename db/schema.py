@@ -1,5 +1,6 @@
 """
 init_db：建立所有資料表，必要時 DROP 重建 screen_records（schema 升級）。
+v6.2：screen_records 結構大改、新增 daily_scores / daily_t86_history。
 """
 import logging
 import config
@@ -66,78 +67,119 @@ CREATE TABLE IF NOT EXISTS analysis_runs (
 );
 """
 
+# v6.2：screen_records 結構大改（取代 v5）
 _SCREEN_DDL = """
 CREATE TABLE IF NOT EXISTS screen_records (
-    id                 SERIAL PRIMARY KEY,
-    guild_id           VARCHAR(30) NOT NULL,
-    screen_date        DATE NOT NULL,
-    sid                VARCHAR(10) NOT NULL,
-    name               VARCHAR(50),
-    grade              VARCHAR(5),
-    score              INT,
-    close_price        NUMERIC(12,2),
-    change_pct         NUMERIC(8,2),
-    vol_ratio          NUMERIC(8,2),
-    foreign_shares     BIGINT,
-    trust_shares       BIGINT,
-    bias_pct           NUMERIC(8,2),
-    bias_label         VARCHAR(20),
-    position_pct       NUMERIC(5,1),
-    chase_mode         VARCHAR(15) DEFAULT 'normal',
-    consec_limit_up    INT DEFAULT 0,
-    entry_zone_low     NUMERIC(12,2),
-    entry_zone_high    NUMERIC(12,2),
-    actual_entry_date  DATE,
-    actual_entry_price NUMERIC(12,2),
-    actual_target1     NUMERIC(12,2),
-    actual_target2     NUMERIC(12,2),
-    actual_stop_loss   NUMERIC(12,2),
-    fill_status        VARCHAR(10) DEFAULT 'pending',
-    settle1_date       DATE,
-    settle2_date       DATE,
-    settle1_price      NUMERIC(12,2),
-    settle2_price      NUMERIC(12,2),
-    settle1_pct        NUMERIC(8,2),
-    settle2_pct        NUMERIC(8,2),
-    settle1_done       BOOLEAN DEFAULT FALSE,
-    settle2_done       BOOLEAN DEFAULT FALSE,
-    hit_target1        BOOLEAN,
-    hit_target2        BOOLEAN,
-    hit_stoploss       BOOLEAN,
-    hit_target1_date   DATE,
-    hit_target2_date   DATE,
-    hit_stoploss_date  DATE,
-    -- v5 追蹤欄位（無論 filled / missed 都寫入 t1_open_price，支援「missed 但漲了 X%」分析）
-    t1_open_price        NUMERIC(12,2),
-    missed_settle1_close NUMERIC(12,2),
-    missed_settle1_pct   NUMERIC(8,2),
-    created_at         TIMESTAMP DEFAULT NOW()
+    id SERIAL PRIMARY KEY,
+    sid VARCHAR(20) NOT NULL,
+    name VARCHAR(50),
+    screen_date DATE NOT NULL,
+    guild_id VARCHAR(50) NOT NULL,
+
+    -- v6.2 評分（10 分制）
+    flow_score INTEGER,
+    trend_score INTEGER,
+    heat_score INTEGER,
+    total_score INTEGER,
+    status VARCHAR(15),
+
+    -- Stalker 累積資料
+    acc_buy_days INTEGER,
+    acc_cum_net BIGINT,
+    cum_5d_pct NUMERIC(6,2),
+    bias_20 NUMERIC(6,2),
+    vol_vs_60d NUMERIC(6,2),
+
+    -- 進場
+    close_price NUMERIC(10,2),
+    fill_status VARCHAR(20),
+    actual_entry_date DATE,
+    actual_entry_price NUMERIC(10,2),
+    t1_open_price NUMERIC(10,2),
+
+    -- 出場（Phase 2 填）
+    actual_target1 NUMERIC(10,2),
+    actual_target2 NUMERIC(10,2),
+    actual_stop_loss NUMERIC(10,2),
+    atr14 NUMERIC(10,4),
+    atr_stop_pct NUMERIC(6,3),
+    max_close_since_entry NUMERIC(10,2),
+    time_stop_date DATE,
+    exit_reason VARCHAR(20),
+
+    -- 結算
+    settle1_date DATE,
+    settle1_price NUMERIC(10,2),
+    settle1_pct NUMERIC(6,2),
+    settle1_done BOOLEAN DEFAULT FALSE,
+    settle2_date DATE,
+    settle2_price NUMERIC(10,2),
+    settle2_pct NUMERIC(6,2),
+    settle2_done BOOLEAN DEFAULT FALSE,
+    hit_target1 BOOLEAN,
+    hit_target2 BOOLEAN,
+    hit_stoploss BOOLEAN,
+    hit_target1_date DATE,
+    hit_target2_date DATE,
+    hit_stoploss_date DATE,
+
+    -- missed hypothetical
+    missed_settle1_close NUMERIC(10,2),
+    missed_settle1_pct NUMERIC(6,2),
+
+    -- meta
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+CREATE INDEX IF NOT EXISTS idx_screen_sid_date   ON screen_records (sid, screen_date DESC);
+CREATE INDEX IF NOT EXISTS idx_screen_guild_date ON screen_records (guild_id, screen_date DESC);
 """
 
-# v5 新增欄位：若 schema_version 沒變但程式版本已升級，用 ALTER TABLE 補欄位（保留歷史資料）
-_ENSURE_V5_COLUMNS_SQL = """
-ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS t1_open_price        NUMERIC(12,2);
-ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS missed_settle1_close NUMERIC(12,2);
-ALTER TABLE screen_records ADD COLUMN IF NOT EXISTS missed_settle1_pct   NUMERIC(8,2);
+# v6.2 新表：每日全 candidate 分數（給「分數動能追蹤」用）
+_DAILY_SCORES_DDL = """
+CREATE TABLE IF NOT EXISTS daily_scores (
+    sid VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    flow_score INTEGER,
+    trend_score INTEGER,
+    heat_score INTEGER,
+    total_score INTEGER,
+    status VARCHAR(15),
+    PRIMARY KEY (sid, date)
+);
+CREATE INDEX IF NOT EXISTS idx_ds_sid_date ON daily_scores (sid, date DESC);
+"""
+
+# v6.2 新表：法人歷史（給 Stalker 5 日累積偵測用）
+_DAILY_T86_HISTORY_DDL = """
+CREATE TABLE IF NOT EXISTS daily_t86_history (
+    sid VARCHAR(20) NOT NULL,
+    date DATE NOT NULL,
+    foreign_net BIGINT,
+    trust_net BIGINT,
+    dealer_net BIGINT,
+    PRIMARY KEY (sid, date)
+);
+CREATE INDEX IF NOT EXISTS idx_t86_sid_date ON daily_t86_history (sid, date DESC);
 """
 
 
 def init_db():
-    """初始化所有資料表；schema 版本不符 → DROP 重建；
-    最後永遠跑 _ENSURE_V5_COLUMNS_SQL（IF NOT EXISTS 冪等），讓 v4→v5 升級不必清空資料。
+    """初始化所有資料表；schema 版本不符 → DROP 重建 screen_records；
+    daily_scores / daily_t86_history 用 IF NOT EXISTS 保護，重啟誤觸也不會清空。
     """
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(_OTHER_DDL)
             ver = get_schema_version(cur)
             if ver != config.SCHEMA_VERSION:
-                logger.warning('[DB] screen_records schema 升級：%s → %s（清空舊資料）', ver, config.SCHEMA_VERSION)
-                cur.execute('DROP TABLE IF EXISTS screen_records')
+                logger.warning('[DB] screen_records schema 升級：%s → %s（清空舊資料）',
+                               ver, config.SCHEMA_VERSION)
+                cur.execute('DROP TABLE IF EXISTS screen_records CASCADE')
                 cur.execute(_SCREEN_DDL)
                 set_schema_version(cur, config.SCHEMA_VERSION)
             else:
                 cur.execute(_SCREEN_DDL)
-            cur.execute(_ENSURE_V5_COLUMNS_SQL)
+            cur.execute(_DAILY_SCORES_DDL)
+            cur.execute(_DAILY_T86_HISTORY_DDL)
         conn.commit()
-    logger.info('[DB] 資料表初始化完成（screen_records %s + v5 追蹤欄位）', config.SCHEMA_VERSION)
+    logger.info('[DB] 資料表初始化完成（schema=%s）', config.SCHEMA_VERSION)

@@ -4,7 +4,8 @@
 def test_top_level_modules_import():
     import importlib
     for name in ('bot', 'stock_bot', 'analysis', 'matching', 'config', 'db',
-                 'discord_bot', 'web_export', 'logging_setup', 'entry_zone'):
+                 'discord_bot', 'web_export', 'logging_setup', 'entry_zone',
+                 'accumulation'):
         m = importlib.import_module(name)
         assert m is not None, f'{name} import returned None'
 
@@ -23,6 +24,8 @@ def test_db_package_exports():
         'get_cumulative_stats', 'get_aggregated_stats',
         'get_holdings', 'add_holding', 'remove_holding',
         'get_challenge', 'add_challenge', 'clear_challenges',
+        # v6.2
+        'save_daily_score', 'fetch_recent_scores',
     ]
     for name in expected:
         assert hasattr(db, name), f'db package missing {name}'
@@ -48,6 +51,16 @@ def test_stock_bot_shim_exports():
         'fetch_t86_cached', 'parse_t86',
         'calc_macd', 'calc_score', 'calc_volume_ratio',
         'check_ema_bull', 'count_consecutive_limit_ups',
+        # v6.2
+        'calc_score_v62', 'classify_status', 'status_to_emoji',
+        'status_to_position_pct',
     ]
     for name in expected:
         assert hasattr(stock_bot, name), f'stock_bot shim missing {name}'
+
+
+def test_v5_grade_constants_removed_from_shim():
+    """v6.2：stock_bot.py 不再 re-export GRADE_SS / GRADE_S / GRADE_A。"""
+    import stock_bot
+    for name in ('GRADE_SS', 'GRADE_S', 'GRADE_A'):
+        assert not hasattr(stock_bot, name), f'shim should not re-export {name} in v6.2'

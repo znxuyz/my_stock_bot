@@ -1,6 +1,11 @@
 """
 連續漲停 + 強勢追漲門檻判定。
+
+v6.2 起 CHASE 路徑整個移除：check_strong_chase 標 @deprecated，永遠回 reject。
+count_consecutive_limit_ups 保留——Stalker filter 第 12 道（10 日內漲停次數 = 0）
+仍會用到，且 /stock 個股查詢顯示有用。
 """
+import warnings
 
 
 def count_consecutive_limit_ups(df, threshold=9.5):
@@ -24,31 +29,18 @@ def count_consecutive_limit_ups(df, threshold=9.5):
     return cnt
 
 
-def check_strong_chase(entry, macd_info, market_score):
+def check_strong_chase(entry, macd_info, market_score):  # noqa: ARG001
+    """v6.2 已移除 CHASE 路徑：永遠回 reject。
+
+    保留簽名給歷史 import 鏈不斷裂；新程式不要呼叫。
     """
-    對連續漲停 ≥ 3 日的股票檢查 5 項追漲門檻。
-    回 {'passed': int, 'reasons': [str], 'checks': [(name, ok)...]}
-    """
-    foreign = entry.get('foreign', 0)
-    trust   = entry.get('trust', 0)
-    total_inst = foreign + trust
-
-    chip_score = entry.get('chip_score', 0)
-    vr         = entry.get('vol_ratio', 0)
-
-    macd_dif = macd_info.get('dif')
-    macd_dea = macd_info.get('dea')
-    macd_exp = macd_info.get('expanding', False)
-    macd_ok  = (macd_dif is not None and macd_dea is not None
-                and macd_dif > macd_dea and macd_exp)
-
-    checks = [
-        ('法人合計買超 ≥ 200K 股', total_inst >= 200000),
-        ('量比 ≥ 2.0x',           vr >= 2.0),
-        ('籌碼集中度 ≥ 10%',       chip_score >= 5),
-        ('MACD 多頭擴張',         macd_ok),
-        ('大盤環境分數 ≥ 0',       market_score >= 0),
-    ]
-    passed  = sum(1 for _, ok in checks if ok)
-    reasons = [('✅ ' if ok else '❌ ') + name for name, ok in checks]
-    return {'passed': passed, 'checks': checks, 'reasons': reasons}
+    warnings.warn(
+        'chase.check_strong_chase is deprecated since v6.2 (CHASE path removed).',
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return {
+        'passed': 0,
+        'checks': [],
+        'reasons': ['v6.2 已移除 CHASE 路徑'],
+    }

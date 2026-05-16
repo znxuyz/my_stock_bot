@@ -17,7 +17,7 @@ PORT = int(os.environ.get('PORT', 8080))
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 
 # 改變此版本號 → init_db 會 DROP 重建 screen_records（清空舊資料）
-SCHEMA_VERSION = 'v4-macd-chase'
+SCHEMA_VERSION = 'v62-pure-stalker-10pt'
 
 # 若 status='running' 超過此時間視為卡死，允許重跑
 RUN_TIMEOUT_SEC = 1800
@@ -52,12 +52,10 @@ RATE_LIMIT_BACKOFF_SEC     = 60     # 退避 60 秒讓 TWSE 恢復
 
 STOCK_API_CACHE_TTL_SEC = 900       # /api/stock 個股查詢快取 15 分鐘
 
-# ─────────── 篩選參數 ───────────
+# ─────────── 基本參數 ───────────
 DATA_READY_HOUR   = 17     # 台灣時間 17:00 後才有當日資料
 MIN_PRICE         = 10     # 收盤價下限
-MIN_INST_SHARE    = 50000  # 法人合計買超最低股數（保留歷史相容；目前實際用下面兩個）
 MAX_CANDIDATES    = 30     # 候選數量保護上限
-VOLUME_RATIO_MIN  = 1.5    # 量比門檻
 
 EMA_SHORT  = 10
 EMA_MID    = 20
@@ -65,15 +63,48 @@ EMA_LONG1  = 60
 EMA_LONG2  = 120
 EMA_FALLBACK_MIN = 60      # 備援 EMA 模式最少需要的 K 棒數
 
-# 等級門檻（漲幅；保留作向下相容）
-GRADE_SS = 7.0
-GRADE_S  = 3.5
-GRADE_A  = 1.0
+# ─────────── Stalker 過濾條件（v6.2） ───────────
+STALKER_DAYS              = 5
+STALKER_MIN_BUY_DAYS      = 4
+STALKER_MAX_CUM_CHANGE    = 3.0
+STALKER_MIN_CUM_CHANGE    = -2.0
+STALKER_MAX_PRICE_RANGE   = 5.0
+STALKER_MAX_TODAY_CHANGE  = 3.0
+STALKER_MIN_TODAY_CHANGE  = -1.0
+STALKER_VOL_RATIO_MIN     = 1.0
+STALKER_VOL_RATIO_MAX     = 1.8
+STALKER_MAX_VOL_VS_60D    = 2.0
+STALKER_MAX_BIAS_10       = 5.0
+STALKER_MAX_BIAS_20       = 3.0
+STALKER_MAX_LIMIT_UPS_10D = 0
 
-# 雙買超門檻
-MIN_FOREIGN_SHARE     = 10000
-MIN_TRUST_SHARE       = 10000
-MIN_INST_SHARE_SINGLE = 100000
+# ─────────── 流動性 + 持有 ───────────
+MIN_DAILY_AMOUNT      = 50_000_000
+MAX_HOLD_DAYS_STALKER = 15  # Phase 2 啟用
+
+# ─────────── 評分門檻（v6.2 10 分制） ───────────
+SCORE_MOMENTUM = 9   # 9-10
+SCORE_ACTIVE   = 7   # 7-8
+SCORE_SETUP    = 5   # 5-6
+SCORE_WATCH    = 3   # 3-4
+# 0-2 = NOISE
+SCORE_PUSH_MIN = SCORE_SETUP  # 推播門檻
+
+# ─────────── MACD（v6.2 全面換敏感版） ───────────
+MACD_FAST   = 8
+MACD_SLOW   = 17
+MACD_SIGNAL = 5
+
+# ─────────── Heat 代理門檻（v6.2） ───────────
+HEAT_PROXY_CUM5D    = 2.0   # 5 日累積漲幅 ≤
+HEAT_PROXY_VOL60D   = 1.3   # 量 / 60 日均量 ≤
+HEAT_PROXY_BIAS20   = 2.0   # 乖離 20MA ≤
+
+# ─────────── v5 已棄用（保留註解，避免 import 鏈斷裂） ───────────
+# GRADE_SS / GRADE_S / GRADE_A：等級門檻（v6.2 改 5 段 status）
+# VOLUME_RATIO_MIN：量比硬門檻（v6.2 用 STALKER_VOL_RATIO_MIN/MAX 雙向）
+# MIN_FOREIGN_SHARE / MIN_TRUST_SHARE / MIN_INST_SHARE_SINGLE：法人股數門檻
+#   （v6.2 第一輪只需「外資 OR 投信 > 0」，再加上 Stalker 5 日累積累積過濾）
 
 # 17:00 觸發一次盤後分析（只在第 0 分；Bot 重啟後由 DB 狀態決定是否要再跑）
 ANALYSIS_TRIGGER_TIMES = [(17, 0)]

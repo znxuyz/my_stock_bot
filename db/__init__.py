@@ -54,6 +54,10 @@ from db.challenges import (
     get_all_challenges,
     clear_challenges,
 )
+from db.scores import (
+    save_daily_score,
+    fetch_recent_scores,
+)
 
 # 為了某些舊呼叫者，保留 SCHEMA_VERSION 與 RUN_TIMEOUT_SEC 常數
 import config as _config
@@ -73,5 +77,7 @@ __all__ = [
     'get_settlement_timeline', 'get_missed_hypothetical_stats',
     'get_holdings', 'add_holding', 'remove_holding', 'get_pnl', 'get_leaderboard',
     'get_challenge', 'add_challenge', 'get_all_challenges', 'clear_challenges',
+    # v6.2
+    'save_daily_score', 'fetch_recent_scores',
     'SCHEMA_VERSION', 'RUN_TIMEOUT_SEC',
 ]

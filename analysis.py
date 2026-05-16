@@ -1,6 +1,8 @@
 """
-盤後分析主流程 run_analysis。
-從 stock_bot.py 抽出，移除原本的死碼（market_env suspend 後的整段重複程式）。
+盤後分析主流程 run_analysis（v6.2）。
+
+策略內核：純 Stalker 篩選 + 10 分制評分 + 5 段分級。
+推播範圍：SETUP+；WATCH / NOISE 仍寫進 daily_scores 給分數動能追蹤。
 """
 import logging
 import os
@@ -13,22 +15,36 @@ import requests
 
 import config
 import db
-from advanced_indicators import calc_advanced_indicators
-from chase import check_strong_chase, count_consecutive_limit_ups
-from entry_zone import calc_entry_zone
-from format_utils import fmt_share_signed as fmt_share
+from accumulation import detect_stalker_setup
+from format_utils import fmt_status_block
 from indicators import (
-    calc_bias_and_entry, calc_macd, calc_volume_ratio, check_ema_bull,
+    calc_bias_and_entry,
+    calc_bias_20,
+    calc_5d_cumulative_change,
+    calc_5d_price_range,
+    calc_daily_amount,
+    calc_ema,
+    calc_macd,
+    calc_vol_vs_60d_ratio,
+    calc_volume_ratio,
+    count_limit_ups_in_window,
 )
 from matching import fill_pending_t1_entries
-from scoring import calc_chip_concentration, calc_market_env, calc_score
+from scoring import (
+    calc_market_env,
+    calc_score_v62,
+    status_to_emoji,
+)
 from time_utils import get_target_date, prev_months, tw_now
 from topflow import extract_top_flow
 from twse_http import clean_sid, safe_get, safe_read_csv
 from twse_kbar import build_history_fast
-from twse_margin import fetch_margin_change
 from twse_market import fetch_market_foreign_history, get_market_info
-from twse_t86 import fetch_t86_cached
+from twse_t86 import (
+    fetch_t86_cached,
+    get_inst_history,
+    save_t86_to_history,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,26 +53,22 @@ _MI_INDEX_PRICE_URL = 'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX'
 
 INDICATOR_GUIDE = """
 ━━━━━━━━━━━━━━━━━━━━━━━━
-📖 **【指標說明】**
-📐 **乖離率（BIAS）**：股價偏離10日均線的幅度
-　0~5% ✅ 理想進場　5~8% ⚠️ 略高　>8% ❌ 過高勿追　負值 🔄 底部
+📖 **【v6.2 指標說明】**
+🎯 **Flow Score（5 分）**：法人累積強度
+　• 5/5 連續買 +2　• 累積淨買 ≥ 500K +2　• 籌碼集中度 ≥ 10% +1
 
-📊 **RSI**：動能強弱指標（0~100）
-　>80 短線過熱（飆股可能鈍化）　60~80 ✅ 強勢　50~60 普通　<50 ❌ 動能弱
+📈 **Trend Score（3 分）**：趨勢確認
+　• 收盤 > 10MA +1　• 10MA 5 日上彎 +1　• MACD(8,17,5) 多頭 +1
 
-🏔 **壓力位**：前期高點，股價容易在此遇賣壓
-　接近壓力區時分批操作，突破壓力才加碼
+🌡 **Heat Score（2 分，反向加分）**：市場熱度
+　• 5 日漲幅 ≤ 2% +1　• 量/60日 ≤ 1.3 +1　• 乖離 20MA ≤ 2% +1
+　（滿足 3 → +2、2 → +1、其餘 0）
 
-📍 **位階**：距近期低點的漲幅，越高追高風險越大
-　<20% ✅ 剛起漲　20~50% 中等　50~100% ⚠️ 偏高　>100% ❌ 極高
+🏷 **狀態分級**：
+　🔵 9-10 MOMENTUM｜🟢 7-8 ACTIVE（主進場）｜🟡 5-6 SETUP（拉回布局）
+　🟠 3-4 WATCH（不交易）｜🔴 0-2 NOISE（不交易）
 
-📦 **OBV（能量潮）**：用成交量確認漲勢是否健康
-　量價同步 ✅ 健康　OBV背離 ⚠️ 漲勢可能假突破
-
-⛔ **動態停損（2×ATR）**：根據股票波動幅度計算的停損點
-　比固定-5%更精準，跌破此價格建議出場
-
-💡 **建議入場價**：考量乖離率、均線、近期低點後的合理買入區間
+⚙️ **進場 / 倉位**：T+1 開盤市價（一字漲停 missed），ACTIVE 30% / SETUP 18%
 ━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
@@ -90,17 +102,165 @@ def _to_native(v):
 
 def _normalise_record(e):
     """把 entry dict 轉成可丟給 db.save_screen_records 的純值 dict。"""
-    out = {k: _to_native(v) for k, v in e.items() if k != 'bias'}
+    out = {k: _to_native(v) for k, v in e.items()
+           if k != 'bias' and not k.startswith('_')}
     if e.get('bias'):
         out['bias'] = {k: _to_native(v) for k, v in e['bias'].items()}
     return out
 
 
-def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
-    """第一輪篩選：收盤價 ≥ MIN_PRICE、漲幅 ≥ GRADE_A、法人買超門檻。
+def _ensure_t86_history_complete(target_date, days=10):
+    """檢查過去 N 個交易日 daily_t86_history 是否完整；缺哪天自動補抓。
+
+    流程：
+      1. 列出過去 N 個工作日（週末跳過）
+      2. 查 daily_t86_history 看哪些日期已有資料
+      3. 缺漏的逐日呼叫 fetch_t86_cached（共享快取，多半免再打 TWSE）
+      4. 抓回非空 df → save_t86_to_history；空 df → 假日；None → 失敗
+
+    回傳 dict：{checked, present, refetched, holiday, failed}。
+    """
+    # 延後 import 避免循環依賴
+    from twse_t86 import _prev_trading_days
+    from db.conn import get_conn
+
+    end_str = target_date.strftime('%Y%m%d')
+    expected_strs = _prev_trading_days(end_str, days)
+    expected_dates = [datetime.strptime(d, '%Y%m%d').date() for d in expected_strs]
+
+    try:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT date FROM daily_t86_history "
+                    "WHERE date >= %s AND date <= %s",
+                    (expected_dates[0], expected_dates[-1]),
+                )
+                present_dates = {r[0] for r in cur.fetchall()}
+    except Exception as e:
+        logger.warning('[T86 完整性] DB 查詢失敗：%s，跳過完整性檢查', e)
+        return {'checked': len(expected_dates), 'present': 0,
+                'refetched': 0, 'holiday': 0, 'failed': 0}
+
+    missing = [d for d in expected_dates if d not in present_dates]
+    if not missing:
+        logger.info('[T86 完整性] 過去 %d 天完整 ✓', days)
+        return {'checked': len(expected_dates),
+                'present': len(present_dates),
+                'refetched': 0, 'holiday': 0, 'failed': 0}
+
+    refetched = holiday = failed = 0
+    for d in missing:
+        d_str = d.strftime('%Y%m%d')
+        try:
+            df_t86 = fetch_t86_cached(d_str)
+            if df_t86 is None:
+                failed += 1
+                logger.debug('[T86 完整性] %s 抓取失敗', d_str)
+                continue
+            if df_t86.empty:
+                holiday += 1
+                continue
+            save_t86_to_history(d_str, df_t86)
+            refetched += 1
+        except Exception as e:
+            failed += 1
+            logger.warning('[T86 完整性] %s 補抓例外：%s', d_str, e)
+
+    logger.info('[T86 完整性] 補抓 %d 個缺漏（成功 %d / 假日 %d / 失敗 %d）',
+                len(missing), refetched, holiday, failed)
+    return {'checked': len(expected_dates),
+            'present': len(present_dates),
+            'refetched': refetched, 'holiday': holiday, 'failed': failed}
+
+
+def _backfill_score_trajectory(sid, df_hist, target_date, days=5):
+    """順手回算過去 N 天的 v6.2 分數，UPSERT 進 daily_scores。
+
+    對每個交易日 D（過去 days 天，含 target_date）：
+      - 用 df_hist 切到 D 為止當作該日的歷史 K 棒
+      - 5 日法人 window = daily_t86_history 裡 (D-4 ~ D) 的紀錄
+      - 該日 foreign+trust = 5 日 window 最後一筆的 net
+      - 重算 Flow/Trend/Heat → 寫 daily_scores
+
+    純讀本機快取 + DB，不打 TWSE。回傳寫入筆數。
+    """
+    if df_hist is None or df_hist.empty or 'date' not in df_hist.columns:
+        return 0
+
+    # 一次撈足夠久的法人歷史避免 N 次 DB 查詢
+    full_window = days + config.STALKER_DAYS  # 5 日 window × 過去 5 天 = 需要 9 天
+    try:
+        inst_full = get_inst_history(sid, days=full_window, end_date=target_date)
+    except Exception as e:
+        logger.warning('[trajectory] %s 法人歷史讀取失敗：%s', sid, e)
+        return 0
+    if not inst_full:
+        return 0
+
+    # df_hist 是 pandas DataFrame；把 date 轉成 python date 方便比較
+    dates_in_df = list(df_hist['date'])
+    dates_in_df_py = []
+    for d in dates_in_df:
+        dates_in_df_py.append(d.date() if hasattr(d, 'date') else d)
+
+    # 取最近 days 個交易日（含 target_date）
+    eligible = [d for d in dates_in_df_py if d <= target_date]
+    if len(eligible) < days:
+        return 0
+    trajectory_days = eligible[-days:]
+
+    written = 0
+    for D in trajectory_days:
+        # 切 K 棒到 D 為止
+        df_slice = df_hist[df_hist['date'].apply(
+            lambda x: (x.date() if hasattr(x, 'date') else x) <= D
+        )]
+        if len(df_slice) < 20:
+            continue
+
+        # 5 日法人 window ending D（取 inst_full 中 date <= D 的最後 5 筆）
+        relevant = [(d, n) for d, n in inst_full if d <= D]
+        if len(relevant) < config.STALKER_DAYS:
+            continue
+        inst_5d = relevant[-config.STALKER_DAYS:]
+
+        # 該日 foreign+trust 合計（用作 Flow 集中度條件 3）
+        net_on_D = inst_5d[-1][1]
+
+        setup = detect_stalker_setup(df_slice, inst_5d)
+        entry_for_score = {
+            'acc_buy_days': setup.get('buy_days', 0),
+            'acc_cum_net':  setup.get('cum_net', 0),
+            # 把 net（foreign+trust）塞 foreign 欄，trust 留 0；
+            # calc_flow_score 的 cond 3 用 max(0,foreign)+max(0,trust) → 結果不變
+            'foreign':      int(net_on_D),
+            'trust':        0,
+            'cum_5d_pct':   calc_5d_cumulative_change(df_slice),
+            'vol_vs_60d':   calc_vol_vs_60d_ratio(df_slice),
+            'bias_20':      calc_bias_20(df_slice),
+            'macd_info':    calc_macd(df_slice),
+        }
+        result = calc_score_v62(entry_for_score, df_slice)
+        try:
+            db.save_daily_score(
+                sid=sid, date=D,
+                flow=result['flow_score'], trend=result['trend_score'],
+                heat=result['heat_score'], total=result['total_score'],
+                status=result['status'],
+            )
+            written += 1
+        except Exception as e:
+            logger.warning('[trajectory] %s %s 寫入失敗：%s', sid, D, e)
+
+    return written
+
+
+def _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign):
+    """v6.2 第一輪：價格 ≥ 10 元 + 漲幅 -1%~+3% + 法人單日有買（外資 OR 投信 > 0）。
 
     注意：用 to_dict('records') 而非 itertuples — 後者會把含特殊字元的欄位
-    （例如 '漲跌(+/-)'、底線開頭）改名成 _NN 位置索引，導致用原欄位名取值會 KeyError。
+    （例如 '漲跌(+/-)'、底線開頭）改名成 _NN 位置索引，導致 KeyError。
     """
     candidates = []
     col_foreign, col_trust = '_foreign', '_trust'
@@ -119,7 +279,9 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
                 diff = -abs(diff) if ('−' in s or s.strip() == '-') else abs(diff)
 
             change = round((diff / (price - diff)) * 100, 2) if (price - diff) != 0 else 0.0
-            if change < config.GRADE_A:
+
+            # v6.2 漲幅雙向硬擋：-1%~+3%
+            if not (config.STALKER_MIN_TODAY_CHANGE <= change <= config.STALKER_MAX_TODAY_CHANGE):
                 continue
 
             inst_row = df_i[df_i['sid_clean'] == sid]
@@ -127,22 +289,18 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
                 continue
             foreign = float(inst_row[col_foreign].values[0])
             trust   = float(inst_row[col_trust].values[0])
-            total   = foreign + trust
-
-            both_buy   = foreign >= config.MIN_FOREIGN_SHARE and trust >= config.MIN_TRUST_SHARE
-            single_buy = total >= config.MIN_INST_SHARE_SINGLE
-            if not (both_buy or single_buy):
+            # 外資 OR 投信當日有買
+            if foreign <= 0 and trust <= 0:
                 continue
 
             candidates.append({
                 'sid': sid, 'name': name,
-                'price': price, 'change': change,
+                'price': float(price), 'change': change,
                 'foreign': int(foreign), 'trust': int(trust),
-                'total': int(total),
+                'total': int(foreign + trust),
             })
         except Exception as e:
             err_count += 1
-            # 同樣錯誤只 log 前 3 筆 + 最後總數，避免重複訊息塞爆 Railway log 額度
             if err_count <= 3:
                 logger.warning('[第一輪] 處理列失敗：%s', e)
     if err_count > 3:
@@ -150,136 +308,78 @@ def _filter_first_round(df, df_i, col_close, col_diff, col_sign):
     return candidates
 
 
-def _enrich_candidate(entry, df_hist, target_date, market_env, date_str):
-    """對通過量比 / EMA 的候選股計算所有指標、評分、追漲模式。"""
+def _enrich_candidate_v62(entry, df_hist, target_date, inst_hist):
+    """v6.2 第二輪 11 道過濾 + 評分。任一硬條件不過回 None。"""
     sid = entry['sid']
 
+    # 第二輪 1. 量比（vs 5 日均量）1.0 ~ 1.8
+    vol_ratio = calc_volume_ratio(df_hist, target_date)
+    if not (config.STALKER_VOL_RATIO_MIN <= vol_ratio <= config.STALKER_VOL_RATIO_MAX):
+        logger.debug('  [enrich] %s 量比 %.2f 不在 %.1f~%.1f', sid, vol_ratio,
+                     config.STALKER_VOL_RATIO_MIN, config.STALKER_VOL_RATIO_MAX)
+        return None
+    entry['vol_ratio'] = vol_ratio
+
+    # 第二輪 2. 今日量 / 60 日均量 < 2.0
+    vol60 = calc_vol_vs_60d_ratio(df_hist)
+    if vol60 is not None and vol60 > config.STALKER_MAX_VOL_VS_60D:
+        return None
+    entry['vol_vs_60d'] = vol60
+
+    # 第二輪 3. 日成交金額 ≥ 5000 萬
+    amount = calc_daily_amount(df_hist)
+    if amount < config.MIN_DAILY_AMOUNT:
+        return None
+
+    # 第二輪 4. 5 日累積漲幅 -2% ~ +3%
+    cum5d = calc_5d_cumulative_change(df_hist)
+    if cum5d is None or not (
+        config.STALKER_MIN_CUM_CHANGE <= cum5d <= config.STALKER_MAX_CUM_CHANGE
+    ):
+        return None
+    entry['cum_5d_pct'] = cum5d
+
+    # 第二輪 5. 5 日 high/low 振幅 < 5%
+    pr = calc_5d_price_range(df_hist)
+    if pr is None or pr >= config.STALKER_MAX_PRICE_RANGE:
+        return None
+
+    # 第二輪 6. 10 日內漲停次數 = 0
+    if count_limit_ups_in_window(df_hist, window=10) > config.STALKER_MAX_LIMIT_UPS_10D:
+        return None
+
+    # 第二輪 7. EMA 20 > EMA 60
+    closes = df_hist['close'].astype(float)
+    if len(df_hist) < 60:
+        return None
+    if calc_ema(closes, 20).iloc[-1] <= calc_ema(closes, 60).iloc[-1]:
+        return None
+
+    # 第二輪 8. 乖離 10MA ≤ 5%
     bias_info = calc_bias_and_entry(df_hist, entry['price'])
+    if not bias_info or bias_info['bias_pct'] > config.STALKER_MAX_BIAS_10:
+        return None
     entry['bias'] = bias_info
 
-    adv = calc_advanced_indicators(df_hist, entry['price'])
-    entry['adv'] = adv
+    # 第二輪 9. 乖離 20MA ≤ 3%
+    bias20 = calc_bias_20(df_hist)
+    if bias20 is None or bias20 > config.STALKER_MAX_BIAS_20:
+        return None
+    entry['bias_20'] = bias20
 
-    entry['market_score'] = market_env.get('score', 0)
+    # 第二輪 10. Stalker 累積偵測：5 日法人買 ≥ 4 天 且累積淨買 > 0
+    setup = detect_stalker_setup(df_hist, inst_hist)
+    if not setup['is_stalker']:
+        return None
+    entry['acc_buy_days'] = setup['buy_days']
+    entry['acc_cum_net']  = setup['cum_net']
 
-    vol_today = int(df_hist['volume'].iloc[-1]) if not df_hist.empty else 0
-    chip = calc_chip_concentration(entry['foreign'], entry['trust'], vol_today)
-    entry['chip_score'] = chip['score']
-    entry['chip_label'] = chip['label']
+    # 第二輪 11. 計算 10 分制評分
+    entry['macd_info'] = calc_macd(df_hist)
+    score_result = calc_score_v62(entry, df_hist)
+    entry.update(score_result)
 
-    entry['consec_score'] = 0
-    entry['consec_label'] = ''
-
-    try:
-        margin = fetch_margin_change(sid, date_str)
-        entry['margin_score'] = margin['score']
-        entry['margin_label'] = margin['label']
-    except Exception as e:
-        entry['margin_score'] = 0
-        entry['margin_label'] = ''
-        logger.warning('[融資] %s 失敗：%s', sid, e)
-
-    macd_info = calc_macd(df_hist)
-    entry['macd_score'] = macd_info['macd_score']
-    entry['macd_label'] = macd_info['macd_label']
-    entry['macd_info']  = macd_info
-
-    consec = count_consecutive_limit_ups(df_hist)
-    entry['consec_limit_up'] = consec
-    if consec >= 3:
-        chase = check_strong_chase(entry, macd_info, entry['market_score'])
-        entry['chase_check'] = chase
-        if chase['passed'] >= 5:
-            entry['chase_mode'] = 'strong_chase'
-        elif chase['passed'] >= 4:
-            entry['chase_mode'] = 'watch'
-        else:
-            entry['chase_mode'] = 'reject'
-    else:
-        entry['chase_mode'] = 'normal'
-
-    entry['score'] = calc_score(entry)
     return entry
-
-
-def _classify(entry, ss, s, a, chase, watch):
-    mode = entry['chase_mode']
-    score = entry['score']
-    if mode == 'strong_chase':
-        chase.append(entry)
-    elif mode == 'watch':
-        watch.append(entry)
-    elif mode == 'reject':
-        return  # 連續漲停但條件不夠，跳過
-    elif score >= 85:
-        ss.append(entry)
-    elif score >= 68:
-        s.append(entry)
-    elif score >= 52:
-        a.append(entry)
-    # < 52 淘汰
-
-
-def _build_stock_block(e):
-    sign    = '+' if e['change'] >= 0 else ''
-    ema_tag = '(備援EMA)' if e.get('ema_mode') == 'fallback' else ''
-    b       = e.get('bias')
-    adv     = e.get('adv') or {}
-    score_str = f' {e["score"]}分' if 'score' in e else ''
-    grade   = e.get('grade', '')
-    emoji_open  = e.get('_emoji_open', '')
-    emoji_close = e.get('_emoji_close', '')
-
-    lines = [
-        f"{emoji_open}【{grade}{score_str}】{e['sid']} {e['name']}{emoji_close}",
-        '',
-        '🔹基本資料',
-        f"收盤價格：{e['price']}　漲幅：{sign}{e['change']}%　量比：{e.get('vol_ratio', 0):.1f}x{ema_tag}",
-        f"外資：{fmt_share(e['foreign'])}股　投信：{fmt_share(e['trust'])}股",
-    ]
-    if b:
-        sp = '+' if b['bias_pct'] >= 0 else ''
-        lines.append(f"乖離率（10日）：{sp}{b['bias_pct']}%　{b['bias_emoji']} {b['bias_label']}")
-
-    mode = e.get('chase_mode', 'normal')
-    zl, zh = calc_entry_zone(e['price'], mode, grade=grade, precision=1)
-    if mode == 'strong_chase':
-        lines += ['', f"🚀強勢追漲（連續{e.get('consec_limit_up', 0)}日漲停）",
-                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍隔日跳空 0~7%）",
-                  "➡️ T+1 開盤在此區間以開盤價買；跳空 >7% 則放棄；跳空跌破收盤視為趨勢反轉，不接刀"]
-    elif mode == 'watch':
-        passed = e.get('chase_check', {}).get('passed', 0)
-        lines += ['', f"⚠️觀察名單（連續{e.get('consec_limit_up', 0)}日漲停但條件不足）",
-                  f"➡️ 5 項追漲門檻僅通過 {passed}/5，**不買入**只觀察"]
-        if e.get('chase_check', {}).get('reasons'):
-            lines += [f"  {r}" for r in e['chase_check']['reasons']]
-    else:
-        gap_label = '3%' if grade == 'SS' else '2%'
-        lines += ['', '🎯建議進場區（限價單）',
-                  f"進場區間：{zl:,.1f} ~ {zh:,.1f} 元（容忍隔日跳空 0~{gap_label}）",
-                  "➡️ 隔日 T+1 觸及才算進場；以實際成交價為準，目標 +5% / +10%、停損 -5%"]
-
-    if adv.get('atr_stop'):
-        lines.append(f"參考動態停損（2×ATR）：{adv['atr_stop']:,.1f} 元（{adv['atr_pct']}%）")
-
-    has_adv = any([
-        adv.get('rsi_label'), adv.get('resistance_label'),
-        adv.get('position_label'), adv.get('obv_label'),
-        (e.get('chip_label') and e.get('chip_score', 0) > 0),
-        e.get('margin_label'), e.get('macd_label'),
-    ])
-    if has_adv:
-        lines += ['', '📊輔助數據']
-        if e.get('macd_label'):       lines.append(f"MACD：{e['macd_label']}")
-        if adv.get('rsi_label'):      lines.append(f"RSI：{adv['rsi_label']}")
-        if adv.get('resistance_label'): lines.append(f"壓力位：{adv['resistance_label']}")
-        if adv.get('position_label'): lines.append(f"位階：{adv['position_label']}")
-        if adv.get('obv_label'):      lines.append(f"OBV：{adv['obv_label']}")
-        if e.get('chip_label') and e.get('chip_score', 0) > 0:
-            lines.append(f"籌碼：{e['chip_label']}")
-        if e.get('margin_label'):     lines.append(f"融資：{e['margin_label']}")
-    lines.append('─' * 25)
-    return '\n'.join(lines)
 
 
 def _send_message(message):
@@ -308,11 +408,7 @@ def _send_message(message):
 
 
 def run_analysis(attempt=0, run_mode=None):
-    """
-    盤後分析主流程。
-    回傳狀態字串：'success' / 'holiday' / 'fail'。
-    run_mode 沒指定時讀 RUN_MODE 環境變數（向下相容）；建議呼叫端直接傳。
-    """
+    """盤後分析主流程。回傳 'success' / 'holiday' / 'fail'。"""
     if not config.DISCORD_WEBHOOK and not config.DATABASE_URL:
         logger.error('[錯誤] 未設定 DISCORD_WEBHOOK 且資料庫未連線，無法發送')
         return 'fail'
@@ -363,7 +459,6 @@ def run_analysis(attempt=0, run_mode=None):
     if r_price is None:
         _notify_all(f'❌ 無法取得 MI_INDEX 收盤資料（{date_str}）\n已重試多次，請手動 `/run` 重試。')
         return 'fail'
-    # 真假日才會走到這（fetch_t86_cached parse 失敗時回 None，已在前面 'fail' 處理）
     if df_i.empty:
         logger.info('[假日] %s T86 回「查詢無資料」，跳過分析', date_str)
         return 'holiday'
@@ -420,21 +515,43 @@ def run_analysis(attempt=0, run_mode=None):
         if not all([col_close, col_diff]):
             raise ValueError(f'找不到收盤/漲跌欄：{list(df.columns)}')
 
-        # 第一輪
-        candidates = _filter_first_round(df, df_i, col_close, col_diff, col_sign)
-        logger.info('[過濾1] 基本條件通過：%d 檔', len(candidates))
-        if len(candidates) > config.MAX_CANDIDATES:
-            candidates.sort(key=lambda e: e['total'], reverse=True)
-            candidates = candidates[:config.MAX_CANDIDATES]
-            logger.info('[過濾4] 截斷至前 %d 名（依法人買超）', config.MAX_CANDIDATES)
-
-        # 第二輪：量比 + EMA + 進階指標 + 評分
-        months      = prev_months(date_str, n=7)
         target_date = datetime.strptime(date_str, '%Y%m%d').date()
-        logger.info('[EMA] 月份清單：%s', months)
 
-        ss_list, s_list, a_list = [], [], []
-        chase_list, watch_list = [], []
+        # v6.2：寫今日 T86 進 history（給 Stalker 5 日偵測讀）
+        try:
+            save_t86_to_history(date_str, df_i)
+        except Exception as e:
+            logger.warning('[T86 history] 寫入今日失敗：%s', e)
+
+        # v6.2：過去 10 個交易日 T86 完整性檢查（缺哪天自動補抓）
+        try:
+            _ensure_t86_history_complete(target_date, days=10)
+        except Exception as e:
+            logger.warning('[T86 完整性] 整體例外：%s', e)
+
+        # 第一輪
+        candidates = _filter_first_round_v62(df, df_i, col_close, col_diff, col_sign)
+        logger.info('[過濾1] 基本條件通過：%d 檔', len(candidates))
+
+        # v6.2 排序鍵：5 日累積法人淨買 DESC（Phase 2 起改 velocity）
+        def _sort_key(c):
+            try:
+                h = get_inst_history(c['sid'], days=config.STALKER_DAYS,
+                                     end_date=target_date)
+                return sum(n for _, n in h) if h else 0
+            except Exception:
+                return 0
+        candidates.sort(key=_sort_key, reverse=True)
+        if len(candidates) > config.MAX_CANDIDATES:
+            candidates = candidates[:config.MAX_CANDIDATES]
+            logger.info('[過濾2] 截斷至前 %d 名（5 日累積法人淨買 DESC）',
+                        config.MAX_CANDIDATES)
+
+        # 第二輪 + 評分
+        months = prev_months(date_str, n=7)
+        logger.info('[EMA] 月份清單：%s', months)
+        enriched = []
+        df_hist_by_sid = {}  # 給「5 日分數軌跡回算」用，不再 build_history_fast 第二次
         consec_fails = 0
 
         for idx_c, entry in enumerate(candidates):
@@ -456,61 +573,77 @@ def run_analysis(attempt=0, run_mode=None):
                     continue
                 consec_fails = 0
 
-                vol_ratio = calc_volume_ratio(df_hist, target_date)
-                if vol_ratio < config.VOLUME_RATIO_MIN:
-                    logger.info('  [%d/%d] %s 量比%.2f ✗ %.1fs', idx_c + 1, len(candidates), sid, vol_ratio, elapsed)
-                    continue
+                try:
+                    inst_hist = get_inst_history(sid, days=config.STALKER_DAYS,
+                                                 end_date=target_date)
+                except Exception as e:
+                    logger.warning('  [%d/%d] %s 法人歷史讀取失敗：%s',
+                                   idx_c + 1, len(candidates), sid, e)
+                    inst_hist = []
 
-                is_bull, ema_mode = check_ema_bull(df_hist)
-                if not is_bull:
-                    logger.info('  [%d/%d] %s EMA%s ✗ %.1fs', idx_c + 1, len(candidates), sid, ema_mode, elapsed)
-                    continue
-                entry['vol_ratio'] = vol_ratio
-                entry['ema_mode']  = ema_mode
-
-                _enrich_candidate(entry, df_hist, target_date, market_env, date_str)
-
-                if entry['chase_mode'] == 'reject':
-                    consec = entry.get('consec_limit_up', 0)
-                    passed = entry.get('chase_check', {}).get('passed', 0)
-                    logger.info('  [%d/%d] %s 連續%d日漲停但只過%d/5 項 ✗', idx_c + 1, len(candidates), sid, consec, passed)
-                    continue
-
-                _classify(entry, ss_list, s_list, a_list, chase_list, watch_list)
-                logger.info("  [%d/%d] %s %s ✓ 漲%s%% 量比%.2f EMA:%s mode:%s %.1fs",
-                                idx_c + 1, len(candidates), sid, entry['name'],
-                                entry['change'], vol_ratio, ema_mode, entry['chase_mode'], elapsed)
+                result = _enrich_candidate_v62(entry, df_hist, target_date, inst_hist)
+                if result is not None:
+                    enriched.append(result)
+                    df_hist_by_sid[sid] = df_hist
+                    logger.info(
+                        "  [%d/%d] %s %s ✓ %d/10 %s 累積%d/5 %.1fs",
+                        idx_c + 1, len(candidates), sid, entry.get('name', ''),
+                        result['total_score'], result['status'],
+                        result['acc_buy_days'], elapsed,
+                    )
+                else:
+                    logger.info('  [%d/%d] %s 未通過 v6.2 過濾 %.1fs',
+                                idx_c + 1, len(candidates), sid, elapsed)
             except Exception as e:
                 logger.warning('  [%d/%d] %s 錯誤：%s', idx_c + 1, len(candidates), sid, e)
 
-        for lst in (ss_list, s_list, a_list, chase_list, watch_list):
-            lst.sort(key=lambda e: e.get('score', 0), reverse=True)
+        # 5 段分桶
+        buckets = {'MOMENTUM': [], 'ACTIVE': [], 'SETUP': [], 'WATCH': [], 'NOISE': []}
+        for r in enriched:
+            buckets[r['status']].append(r)
+        for v in buckets.values():
+            v.sort(key=lambda e: e.get('total_score', 0), reverse=True)
 
-        # 寫入資料庫（每個 guild 各一份）
+        push_list = buckets['MOMENTUM'] + buckets['ACTIVE'] + buckets['SETUP']
+
+        # 寫 daily_scores（所有 enriched candidate 都寫，含 WATCH/NOISE）+
+        # 順手回算過去 5 天分數軌跡（給 Phase 2 velocity 排序鍵 / Discord 卡片用）
+        traj_total = 0
         try:
-            sd = _date(int(date_str[:4]), int(date_str[4:6]), int(date_str[6:]))
-            graded = (
-                [(e, 'SS')    for e in ss_list]    +
-                [(e, 'S')     for e in s_list]     +
-                [(e, 'A')     for e in a_list]     +
-                [(e, 'CHASE') for e in chase_list] +
-                [(e, 'WATCH') for e in watch_list]
-            )
-            cleaned = []
-            for e, g in graded:
-                copy = dict(e)
-                copy['grade'] = g
-                cleaned.append(_normalise_record(copy))
+            for r in enriched:
+                db.save_daily_score(
+                    sid=r['sid'], date=target_date,
+                    flow=r['flow_score'], trend=r['trend_score'],
+                    heat=r['heat_score'], total=r['total_score'],
+                    status=r['status'],
+                )
+                df_hist_cache = df_hist_by_sid.get(r['sid'])
+                if df_hist_cache is not None:
+                    try:
+                        traj_total += _backfill_score_trajectory(
+                            r['sid'], df_hist_cache, target_date, days=5,
+                        )
+                    except Exception as e:
+                        logger.warning('[trajectory] %s 回算失敗：%s', r['sid'], e)
+        except Exception as e:
+            logger.error('[daily_scores] 寫入失敗：%s', e)
+        if traj_total:
+            logger.info('[trajectory] 共回算 %d 筆過去 5 日分數軌跡', traj_total)
+
+        # 寫 screen_records（只寫 SETUP+，WATCH/NOISE 不進主表）
+        try:
+            cleaned = [_normalise_record(r) for r in push_list]
             if cleaned:
                 guilds = db.get_all_webhooks()
                 for gw in guilds:
                     try:
-                        db.save_screen_records(cleaned, sd, gw['guild_id'])
+                        db.save_screen_records(cleaned, target_date, gw['guild_id'])
                     except Exception as ge:
                         logger.error('[DB] guild %s 寫入失敗：%s', gw['guild_id'], ge)
-                logger.info('[DB] 儲存 %d 筆至 %d 個伺服器', len(cleaned), len(guilds))
+                logger.info('[DB] 儲存 %d 筆至 %d 個伺服器',
+                            len(cleaned), len(guilds))
         except Exception as e:
-            logger.error('[DB] 寫入失敗：%s', e)
+            logger.error('[DB] screen_records 寫入失敗：%s', e)
 
         # T+1 撮合
         try:
@@ -527,7 +660,10 @@ def run_analysis(attempt=0, run_mode=None):
             logger.error('[Web] Dashboard 匯出失敗：%s', e)
 
         total_elapsed = time.time() - t_start
-        logger.info('[完成] SS=%d S=%d A=%d，總耗時=%.0f秒', len(ss_list), len(s_list), len(a_list), total_elapsed)
+        logger.info('[完成] MOMENTUM=%d ACTIVE=%d SETUP=%d (WATCH=%d NOISE=%d)，總耗時=%.0f秒',
+                    len(buckets['MOMENTUM']), len(buckets['ACTIVE']),
+                    len(buckets['SETUP']), len(buckets['WATCH']),
+                    len(buckets['NOISE']), total_elapsed)
 
         # ── 組裝 Discord 訊息 ──
         if market:
@@ -545,20 +681,19 @@ def run_analysis(attempt=0, run_mode=None):
         )
 
         sections = []
-        for lst, emoji_open, label, emoji_close, limit in (
-            (ss_list,    '🔥', 'SS',    '🔥', 10),
-            (s_list,     '💎', 'S',     '💎', 10),
-            (a_list,     '📈', 'A',     '📈', 10),
-            (chase_list, '🚀', 'CHASE', '🚀', 5),
-            (watch_list, '⚠️', 'WATCH', '⚠️', 5),
-        ):
-            for e in lst[:limit]:
-                e['grade']        = label
-                e['_emoji_open']  = emoji_open
-                e['_emoji_close'] = emoji_close
-                sections.append(_build_stock_block(e))
+        for label in ('MOMENTUM', 'ACTIVE', 'SETUP'):
+            lst = buckets[label]
+            if not lst:
+                continue
+            sections.append(
+                f"\n━━━ {status_to_emoji(label)} {label} ({len(lst)} 檔) ━━━"
+            )
+            for e in lst[:10]:
+                sections.append(fmt_status_block(e))
+
         if not sections:
-            sections.append('（今日無符合條件之標的）')
+            sections.append('（今日無符合 v6.2 Stalker 條件之標的；'
+                            '「找不到標的」是 feature——今天沒有好的累積 setup）')
 
         full_message = header + '\n\n' + '\n\n'.join(sections) + '\n\n' + INDICATOR_GUIDE
         _send_message(full_message)

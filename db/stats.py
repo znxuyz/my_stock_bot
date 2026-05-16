@@ -1,5 +1,5 @@
 """
-統計查詢：累積勝率、按等級/乖離/月分組、settlement timeline。
+統計查詢（v6.2）：累積勝率、按 status / bias_20 / month 分組、settlement timeline。
 給 /report /stats 與 dashboard 用。
 """
 import logging
@@ -12,10 +12,27 @@ from db.conn import get_conn
 logger = logging.getLogger(__name__)
 
 
+_STATUS_ORDER_SQL = """
+CASE status
+    WHEN 'MOMENTUM' THEN 1
+    WHEN 'ACTIVE'   THEN 2
+    WHEN 'SETUP'    THEN 3
+    WHEN 'WATCH'    THEN 4
+    WHEN 'NOISE'    THEN 5
+    ELSE 6
+END
+"""
+
+
 def get_cumulative_stats(guild_id):
-    """單一 guild 的等級 / 乖離 / 雙買超分組統計。"""
-    grade_sql = """
-    SELECT grade,
+    """單一 guild 的 status / bias_20 分組統計。
+
+    回傳 (status_rows, bias_rows, dual_rows)
+      v6.2：dual_rows 仍依「flow_score ≥ 3」/「< 3」分為兩組
+            （v5 雙買超概念在 v6.2 已不存在，改用 flow 子分數高 / 低做替代）
+    """
+    status_sql = f"""
+    SELECT status,
         COUNT(*) AS total,
         SUM(CASE WHEN fill_status='filled'  THEN 1 ELSE 0 END) AS filled,
         SUM(CASE WHEN fill_status='missed'  THEN 1 ELSE 0 END) AS missed,
@@ -30,16 +47,15 @@ def get_cumulative_stats(guild_id):
         SUM(CASE WHEN hit_target2  THEN 1 ELSE 0 END) AS hit_t2,
         SUM(CASE WHEN hit_stoploss THEN 1 ELSE 0 END) AS hit_sl
     FROM screen_records WHERE guild_id = %s
-    GROUP BY grade
-    ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
-                        WHEN 'A' THEN 3 WHEN 'X' THEN 4 END
+    GROUP BY status
+    ORDER BY {_STATUS_ORDER_SQL}
     """
     bias_sql = """
     SELECT
-        CASE WHEN bias_pct <= 5 THEN '理想(0-5%)'
-             WHEN bias_pct <= 8 THEN '略高(5-8%)'
-             WHEN bias_pct > 8  THEN '過高(>8%)'
-             ELSE '底部(<0%)' END AS bias_zone,
+        CASE WHEN bias_20 <= 1 THEN '極冷(≤1%)'
+             WHEN bias_20 <= 2 THEN '偏冷(1~2%)'
+             WHEN bias_20 <= 3 THEN '邊界(2~3%)'
+             ELSE '超門檻(>3%)' END AS bias_zone,
         COUNT(*) AS total,
         SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
         SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
@@ -47,13 +63,12 @@ def get_cumulative_stats(guild_id):
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
         AVG(settle1_pct) AS avg_ret
     FROM screen_records
-    WHERE guild_id = %s AND bias_pct IS NOT NULL
+    WHERE guild_id = %s AND bias_20 IS NOT NULL
     GROUP BY bias_zone
     """
     dual_sql = """
     SELECT
-        CASE WHEN foreign_shares >= 10000 AND trust_shares >= 10000
-             THEN '雙買超' ELSE '單方買超' END AS buy_type,
+        CASE WHEN flow_score >= 3 THEN 'Flow≥3' ELSE 'Flow<3' END AS buy_type,
         COUNT(*) AS total,
         SUM(CASE WHEN fill_status='filled' THEN 1 ELSE 0 END) AS filled,
         SUM(CASE WHEN fill_status='missed' THEN 1 ELSE 0 END) AS missed,
@@ -63,16 +78,16 @@ def get_cumulative_stats(guild_id):
     FROM screen_records WHERE guild_id = %s
     GROUP BY buy_type
     """
-    grade_rows, bias_rows, dual_rows = [], [], []
+    status_rows, bias_rows, dual_rows = [], [], []
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(grade_sql, (guild_id,)); grade_rows = list(cur.fetchall())
-                cur.execute(bias_sql,  (guild_id,)); bias_rows  = list(cur.fetchall())
-                cur.execute(dual_sql,  (guild_id,)); dual_rows  = list(cur.fetchall())
+                cur.execute(status_sql, (guild_id,)); status_rows = list(cur.fetchall())
+                cur.execute(bias_sql,   (guild_id,)); bias_rows   = list(cur.fetchall())
+                cur.execute(dual_sql,   (guild_id,)); dual_rows   = list(cur.fetchall())
     except Exception as e:
         logger.error('[DB] get_cumulative_stats 錯誤：%s\n%s', e, traceback.format_exc())
-    return grade_rows, bias_rows, dual_rows
+    return status_rows, bias_rows, dual_rows
 
 
 # ─────────── 跨 guild 彙總（給 dashboard 用） ───────────
@@ -87,12 +102,13 @@ def get_latest_screen_date():
 def get_screens_by_date(screen_date):
     sql = """
     SELECT DISTINCT ON (sid)
-        screen_date, sid, name, grade, score, close_price, change_pct,
-        vol_ratio, foreign_shares, trust_shares, bias_pct, bias_label,
-        position_pct, chase_mode, consec_limit_up,
-        entry_zone_low, entry_zone_high, fill_status,
+        screen_date, sid, name,
+        flow_score, trend_score, heat_score, total_score, status,
+        acc_buy_days, acc_cum_net, cum_5d_pct, bias_20, vol_vs_60d,
+        close_price, fill_status,
         actual_entry_date, actual_entry_price,
         actual_target1, actual_target2, actual_stop_loss,
+        atr14, atr_stop_pct, exit_reason,
         settle1_date, settle2_date, settle1_price, settle2_price,
         settle1_pct, settle2_pct, settle1_done, settle2_done,
         hit_target1, hit_target2, hit_stoploss,
@@ -110,12 +126,14 @@ def get_screens_by_date(screen_date):
 def get_history_records(limit_days=90):
     sql = """
     SELECT DISTINCT ON (screen_date, sid)
-        screen_date, sid, name, grade, score, close_price, change_pct,
-        vol_ratio, bias_pct,
-        chase_mode, consec_limit_up,
-        entry_zone_low, entry_zone_high, fill_status,
+        screen_date, sid, name,
+        flow_score, trend_score, heat_score, total_score, status,
+        acc_buy_days, acc_cum_net,
+        close_price, cum_5d_pct, bias_20,
+        fill_status,
         actual_entry_date, actual_entry_price,
         actual_target1, actual_target2, actual_stop_loss,
+        exit_reason,
         settle1_pct, settle2_pct, settle1_done, settle2_done,
         hit_target1, hit_target2, hit_stoploss,
         hit_target1_date, hit_target2_date, hit_stoploss_date
@@ -130,17 +148,17 @@ def get_history_records(limit_days=90):
 
 
 def get_aggregated_stats():
-    """跨 guild 去重後依 grade / bias / month 分組統計。"""
-    grade_sql = """
+    """跨 guild 去重後依 status / bias_20 / month 分組統計。"""
+    status_sql = f"""
     WITH dedup AS (
         SELECT DISTINCT ON (screen_date, sid)
-            grade, fill_status,
+            status, fill_status,
             settle1_pct, settle2_pct, settle1_done, settle2_done,
             hit_target1, hit_target2, hit_stoploss
         FROM screen_records
         ORDER BY screen_date, sid, id
     )
-    SELECT grade,
+    SELECT status,
         COUNT(*) AS total,
         SUM(CASE WHEN fill_status='filled'  THEN 1 ELSE 0 END) AS filled,
         SUM(CASE WHEN fill_status='missed'  THEN 1 ELSE 0 END) AS missed,
@@ -155,23 +173,22 @@ def get_aggregated_stats():
         SUM(CASE WHEN hit_target2  THEN 1 ELSE 0 END) AS hit_t2,
         SUM(CASE WHEN hit_stoploss THEN 1 ELSE 0 END) AS hit_sl
     FROM dedup
-    GROUP BY grade
-    ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
-                        WHEN 'A' THEN 3 WHEN 'X' THEN 4 ELSE 5 END
+    GROUP BY status
+    ORDER BY {_STATUS_ORDER_SQL}
     """
     bias_sql = """
     WITH dedup AS (
         SELECT DISTINCT ON (screen_date, sid)
-            bias_pct, settle1_pct, settle1_done
+            bias_20, settle1_pct, settle1_done
         FROM screen_records
-        WHERE bias_pct IS NOT NULL
+        WHERE bias_20 IS NOT NULL
         ORDER BY screen_date, sid, id
     )
     SELECT
-        CASE WHEN bias_pct < 0  THEN '底部(<0%)'
-             WHEN bias_pct <= 5 THEN '理想(0-5%)'
-             WHEN bias_pct <= 8 THEN '略高(5-8%)'
-             ELSE '過高(>8%)' END AS bias_zone,
+        CASE WHEN bias_20 <= 1 THEN '極冷(≤1%)'
+             WHEN bias_20 <= 2 THEN '偏冷(1~2%)'
+             WHEN bias_20 <= 3 THEN '邊界(2~3%)'
+             ELSE '超門檻(>3%)' END AS bias_zone,
         COUNT(*) AS total,
         SUM(CASE WHEN settle1_done THEN 1 ELSE 0 END) AS settled,
         SUM(CASE WHEN settle1_pct > 0 THEN 1 ELSE 0 END) AS win,
@@ -193,11 +210,11 @@ def get_aggregated_stats():
            AVG(settle1_pct) AS avg_ret
     FROM dedup GROUP BY ym ORDER BY ym DESC LIMIT 12
     """
-    out = {'grade': [], 'bias': [], 'monthly': []}
+    out = {'status': [], 'bias': [], 'monthly': []}
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
-                cur.execute(grade_sql);   out['grade']   = list(cur.fetchall())
+                cur.execute(status_sql);  out['status']  = list(cur.fetchall())
                 cur.execute(bias_sql);    out['bias']    = list(cur.fetchall())
                 cur.execute(monthly_sql); out['monthly'] = list(cur.fetchall())
     except Exception as e:
@@ -239,18 +256,7 @@ def get_aggregated_summary():
 
 
 def get_missed_hypothetical_stats():
-    """
-    跨 guild 彙總「missed 但漲了 X%」的反向統計，用來量化「保守過頭損失多少」。
-    只用 round 1 假設結算（missed_settle1_pct）。
-    回傳 dict：
-      total       missed 但已補算的筆數
-      win         其中 missed 但漲（pct > 0）的筆數 → 真的「該追沒追到」
-      win_rate    win / total（百分比；無資料 → None）
-      avg_ret     平均假設報酬
-      best        最大漲幅
-      worst       最大跌幅
-      by_grade    各等級的 [{grade, total, win, win_rate, avg_ret}]
-    """
+    """跨 guild 彙總「missed 但漲了 X%」的反向統計（v6.2 改依 status 分組）。"""
     summary_sql = """
     WITH dedup AS (
         SELECT DISTINCT ON (screen_date, sid) missed_settle1_pct
@@ -266,26 +272,24 @@ def get_missed_hypothetical_stats():
         MIN(missed_settle1_pct) AS worst
     FROM dedup
     """
-    grade_sql = """
+    status_sql = f"""
     WITH dedup AS (
-        SELECT DISTINCT ON (screen_date, sid) grade, missed_settle1_pct
+        SELECT DISTINCT ON (screen_date, sid) status, missed_settle1_pct
         FROM screen_records
         WHERE fill_status = 'missed' AND missed_settle1_pct IS NOT NULL
         ORDER BY screen_date, sid, id
     )
-    SELECT grade,
+    SELECT status,
         COUNT(*)::int AS total,
         SUM(CASE WHEN missed_settle1_pct > 0 THEN 1 ELSE 0 END)::int AS win,
         AVG(missed_settle1_pct) AS avg_ret
     FROM dedup
-    GROUP BY grade
-    ORDER BY CASE grade WHEN 'SS' THEN 1 WHEN 'S' THEN 2
-                        WHEN 'A' THEN 3 WHEN 'CHASE' THEN 4
-                        WHEN 'WATCH' THEN 5 ELSE 6 END
+    GROUP BY status
+    ORDER BY {_STATUS_ORDER_SQL}
     """
     out = {'total': 0, 'win': 0, 'win_rate': None,
            'avg_ret': None, 'best': None, 'worst': None,
-           'by_grade': []}
+           'by_status': []}
     try:
         with get_conn() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
@@ -301,19 +305,19 @@ def get_missed_hypothetical_stats():
                     'best':    float(row['best'])    if row.get('best')    is not None else None,
                     'worst':   float(row['worst'])   if row.get('worst')   is not None else None,
                 })
-                cur.execute(grade_sql)
+                cur.execute(status_sql)
                 rows = []
                 for r in cur.fetchall():
                     g_total = int(r['total'] or 0)
                     g_win   = int(r['win']   or 0)
                     rows.append({
-                        'grade':    r['grade'],
+                        'status':   r['status'],
                         'total':    g_total,
                         'win':      g_win,
                         'win_rate': round(g_win / g_total * 100, 1) if g_total else None,
                         'avg_ret':  float(r['avg_ret']) if r['avg_ret'] is not None else None,
                     })
-                out['by_grade'] = rows
+                out['by_status'] = rows
     except Exception as e:
         logger.error('[DB] get_missed_hypothetical_stats 錯誤：%s\n%s', e, traceback.format_exc())
     return out

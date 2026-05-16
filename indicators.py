@@ -69,12 +69,16 @@ def calc_obv(df):
     return signed.cumsum()
 
 
-def calc_macd(df, fast=12, slow=26, signal=9):
+def calc_macd(df, fast=None, slow=None, signal=None):
     """
-    MACD：DIF = EMA(fast) - EMA(slow)；DEA = EMA(DIF, signal)；Hist = DIF - DEA
+    MACD：DIF = EMA(fast) - EMA(slow)；DEA = EMA(DIF, signal)；Hist = DIF - DEA。
+    v6.2 預設 (8, 17, 5)。
     回傳 dict 含 macd_score (0~10) / macd_label / dif / dea / hist / expanding / cross_up
-    需至少 slow + signal 筆才有意義（35 筆）。
     """
+    fast   = fast   if fast   is not None else config.MACD_FAST
+    slow   = slow   if slow   is not None else config.MACD_SLOW
+    signal = signal if signal is not None else config.MACD_SIGNAL
+
     if len(df) < slow + signal:
         return {'macd_score': 5, 'macd_label': '⚪ MACD 資料不足',
                 'dif': None, 'dea': None, 'hist': None,
@@ -92,7 +96,6 @@ def calc_macd(df, fast=12, slow=26, signal=9):
     last_hist = float(hist.iloc[-1])
     prev_hist = float(hist.iloc[-2]) if len(hist) >= 2 else 0.0
 
-    # 最近 3 天有沒有發生黃金交叉
     cross_up = False
     for i in range(max(1, len(dif) - 3), len(dif)):
         if dif.iloc[i - 1] <= dea.iloc[i - 1] and dif.iloc[i] > dea.iloc[i]:
@@ -142,3 +145,86 @@ def calc_bias_and_entry(df, price):
     else:
         emoji, label = '🔄', '底部觀察'
     return {'bias_pct': bias_pct, 'bias_label': label, 'bias_emoji': emoji}
+
+
+# ─────────── v6.2 新增 ───────────
+
+def calc_5d_cumulative_change(df):
+    """近 5 日累積漲幅（%）= (今收 / 5 個交易日前收 - 1) × 100。
+    需 ≥ 6 筆資料；不足回 None。"""
+    if len(df) < 6:
+        return None
+    closes = df['close'].astype(float)
+    base = closes.iloc[-6]
+    if base == 0:
+        return None
+    return round((closes.iloc[-1] / base - 1) * 100, 2)
+
+
+def calc_5d_price_range(df):
+    """近 5 日 high/low 振幅（%）= (max_high / min_low - 1) × 100。
+    需 ≥ 5 筆資料；不足或 low ≤ 0 回 None。"""
+    if len(df) < 5:
+        return None
+    recent = df.tail(5)
+    h = recent['high'].astype(float).max()
+    l = recent['low'].astype(float).min()
+    if l <= 0:
+        return None
+    return round((h / l - 1) * 100, 2)
+
+
+def count_limit_ups_in_window(df, window=10, threshold=9.5):
+    """近 N 個交易日內漲停（≥ threshold%）次數。資料不足回 0。"""
+    if len(df) < window + 1:
+        return 0
+    closes = df['close'].astype(float).values
+    cnt = 0
+    start = max(1, len(closes) - window)
+    for i in range(start, len(closes)):
+        prev = closes[i - 1]
+        if prev <= 0:
+            continue
+        if (closes[i] - prev) / prev * 100 >= threshold:
+            cnt += 1
+    return cnt
+
+
+def calc_bias_20(df):
+    """20 日乖離率（%）= (今收 - MA20) / MA20 × 100。資料不足回 None。"""
+    if len(df) < 20:
+        return None
+    closes = df['close'].astype(float)
+    ma20 = closes.tail(20).mean()
+    if ma20 == 0:
+        return None
+    return round((closes.iloc[-1] - ma20) / ma20 * 100, 2)
+
+
+def calc_ma_slope_5d(df, period=10):
+    """N 日 MA 的近 5 日斜率（>0 = 上彎）。資料不足回 None。"""
+    if len(df) < period + 4:
+        return None
+    closes = df['close'].astype(float)
+    ma = closes.rolling(period).mean().dropna()
+    if len(ma) < 5:
+        return None
+    recent = ma.tail(5).values
+    return float(recent[-1] - recent[0])
+
+
+def calc_daily_amount(df):
+    """日成交金額（元）= close × volume × 1000。空 df 回 0。"""
+    if df.empty:
+        return 0.0
+    return float(df['close'].iloc[-1]) * float(df['volume'].iloc[-1]) * 1000
+
+
+def calc_vol_vs_60d_ratio(df):
+    """今日量 / 過去 60 日均量（不含今日）。資料不足回 None。"""
+    if len(df) < 61:
+        return None
+    avg60 = df['volume'].astype(float).tail(61).iloc[:-1].mean()
+    if avg60 == 0:
+        return None
+    return round(float(df['volume'].iloc[-1]) / avg60, 2)

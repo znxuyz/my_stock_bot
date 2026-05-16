@@ -4,6 +4,18 @@
 同步更新 [Web Dashboard](https://znxuyz.github.io/my_stock_bot/)（**「量化篩選系統」PWA**，
 可加到 iOS / Android 主畫面當獨立 app）。
 
+> ⚠️ **v6.2 Breaking Change**：`SCHEMA_VERSION` 升版會 **DROP `screen_records`
+> 重建**，歷史 v5 資料清空。首次部署後 `daily_t86_history` 需累積 5 個交易日
+> Stalker 才會出現訊號，**第一週可能 0 標的，這是預期行為**。
+>
+> 同時換掉：策略內核（純 Stalker 篩選）、評分制（100 → 10 分 Flow/Trend/Heat）、
+> 等級制度（SS/S/A → MOMENTUM/ACTIVE/SETUP/WATCH/NOISE）、MACD 參數
+> （(12,26,9) → (8,17,5)，含 `/stock` 個股查詢）、進場機制（限價區間 → 純市價），
+> 並移除 CHASE / WATCH 路徑。詳見 [`CHANGELOG.md`](CHANGELOG.md) 與
+> [`STRATEGY_V6.md`](STRATEGY_V6.md)。已棄用的 v5 函式（`scoring.calc_score`、
+> `chase.check_strong_chase`、`db.settle.calc_position_pct`、`entry_zone.calc_entry_zone`）
+> 仍保留並標 `@deprecated`，呼叫會發出警告。
+
 | 服務 | 連結 |
 |------|------|
 | Bot HTTP 端點 | https://mystockbot.up.railway.app |

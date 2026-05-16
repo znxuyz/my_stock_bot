@@ -1,11 +1,16 @@
-"""連續漲停 + 強勢追漲測試。"""
+"""連續漲停 + 強勢追漲（deprecated）測試。
+
+v6.2 起 check_strong_chase 永遠回 reject；count_consecutive_limit_ups 仍正常運作
+（Stalker filter 「10 日內漲停 = 0」會用到）。
+"""
+import warnings
+
 import pandas as pd
 
 from chase import check_strong_chase, count_consecutive_limit_ups
 
 
 def test_count_consecutive_4_days():
-    """從 100 連續 +10% 4 天。"""
     df = pd.DataFrame({'close': [100, 110, 121, 133.1, 146.41]})
     assert count_consecutive_limit_ups(df) == 4
 
@@ -26,35 +31,24 @@ def test_count_consecutive_threshold_boundary():
     assert count_consecutive_limit_ups(df) == 1
 
 
-def test_check_strong_chase_all_pass():
-    entry = {
-        'foreign': 150000, 'trust': 100000,  # 合計 250K
-        'vol_ratio': 2.5,
-        'chip_score': 5,
-    }
-    macd = {'dif': 1.0, 'dea': 0.5, 'expanding': True}
-    result = check_strong_chase(entry, macd, market_score=3)
-    assert result['passed'] == 5
-
-
-def test_check_strong_chase_all_fail():
-    entry = {
-        'foreign': 50000, 'trust': 30000,
-        'vol_ratio': 1.0,
-        'chip_score': 2,
-    }
-    macd = {'dif': -1.0, 'dea': 0.5, 'expanding': False}
-    result = check_strong_chase(entry, macd, market_score=-3)
-    assert result['passed'] == 0
-
-
-def test_check_strong_chase_4_of_5():
-    """通過 4 項對應 watch 模式。"""
+def test_check_strong_chase_always_rejects_in_v62():
+    """v6.2：check_strong_chase 永遠回 reject（passed=0）。"""
     entry = {
         'foreign': 150000, 'trust': 100000,
         'vol_ratio': 2.5,
         'chip_score': 5,
     }
     macd = {'dif': 1.0, 'dea': 0.5, 'expanding': True}
-    result = check_strong_chase(entry, macd, market_score=-3)  # 大盤分數負
-    assert result['passed'] == 4
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore', DeprecationWarning)
+        result = check_strong_chase(entry, macd, market_score=3)
+    assert result['passed'] == 0
+    assert result['checks'] == []
+    assert any('v6.2' in r for r in result['reasons'])
+
+
+def test_check_strong_chase_emits_deprecation_warning():
+    with warnings.catch_warnings(record=True) as w:
+        warnings.simplefilter('always')
+        check_strong_chase({}, {}, market_score=0)
+    assert any(issubclass(x.category, DeprecationWarning) for x in w)

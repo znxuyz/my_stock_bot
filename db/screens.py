@@ -1,58 +1,60 @@
 """
-screen_records：篩選結果寫入、依日期/歷史查詢。
-T+1 撮合與結算寫入請看 db.settle。
+screen_records 寫入（v6.2）。
+
+寫入欄位對應新 schema：flow/trend/heat/total/status/acc_*/cum_5d_pct/bias_20/vol_vs_60d ...
+冪等：寫入前先 DELETE 同 (screen_date, guild_id) 的 pending 紀錄。
 """
 import logging
+
 from psycopg2.extras import RealDictCursor
 
 from db.conn import get_conn
-from db.settle import calc_position_pct, next_friday
-from entry_zone import calc_entry_zone
+from db.settle import next_friday
 
 logger = logging.getLogger(__name__)
 
 
 def save_screen_records(records, screen_date, guild_id):
-    """
-    寫入篩選結果。chase_mode + grade 決定 entry_zone（見 entry_zone.py）。
-    fill_status 初始：strong_chase / normal → 'pending'；watch → 'watch'（不撮合）。
+    """寫入篩選結果。v6.2：純市價 → fill_status 一律 'pending'。
 
-    冪等：寫入前先 DELETE 同 (screen_date, guild_id) 的 pending 紀錄。
+    參數 records 是 dict list；對應欄位請看下方 SQL 參數順序。
     """
     settle1 = next_friday(screen_date, 1)
     settle2 = next_friday(screen_date, 2)
     rows = []
     for e in records:
-        b      = e.get('bias') or {}
-        grade  = e.get('grade', '')
-        pos    = calc_position_pct(grade, b.get('bias_pct'))
         close  = float(e.get('price', 0))
-        mode   = e.get('chase_mode', 'normal')
-        consec = int(e.get('consec_limit_up', 0))
-
-        zone_low, zone_high = calc_entry_zone(close, mode, grade=grade, precision=2)
-        init_fill = 'watch' if mode == 'watch' else 'pending'
-
         rows.append((
-            guild_id, screen_date,
-            e['sid'], e.get('name', ''), e.get('grade', ''),
-            int(e.get('score', 0)),
-            close, e.get('change', 0), e.get('vol_ratio', 0),
-            e.get('foreign', 0), e.get('trust', 0),
-            b.get('bias_pct'), b.get('bias_label', ''),
-            pos, mode, consec,
-            zone_low, zone_high, init_fill,
+            e['sid'], e.get('name', ''), screen_date, guild_id,
+            int(e.get('flow_score',  0) or 0),
+            int(e.get('trend_score', 0) or 0),
+            int(e.get('heat_score',  0) or 0),
+            int(e.get('total_score', 0) or 0),
+            e.get('status', 'NOISE'),
+            int(e.get('acc_buy_days', 0) or 0),
+            int(e.get('acc_cum_net',  0) or 0),
+            e.get('cum_5d_pct'),
+            e.get('bias_20'),
+            e.get('vol_vs_60d'),
+            close,
+            'pending',
             settle1, settle2,
         ))
 
     sql = """
     INSERT INTO screen_records
-      (guild_id, screen_date, sid, name, grade, score, close_price,
-       change_pct, vol_ratio, foreign_shares, trust_shares,
-       bias_pct, bias_label, position_pct, chase_mode, consec_limit_up,
-       entry_zone_low, entry_zone_high, fill_status,
+      (sid, name, screen_date, guild_id,
+       flow_score, trend_score, heat_score, total_score, status,
+       acc_buy_days, acc_cum_net,
+       cum_5d_pct, bias_20, vol_vs_60d,
+       close_price, fill_status,
        settle1_date, settle2_date)
-    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+    VALUES (%s,%s,%s,%s,
+            %s,%s,%s,%s,%s,
+            %s,%s,
+            %s,%s,%s,
+            %s,%s,
+            %s,%s)
     """
     del_sql = """
     DELETE FROM screen_records
@@ -61,16 +63,17 @@ def save_screen_records(records, screen_date, guild_id):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(del_sql, (guild_id, screen_date))
-            cur.executemany(sql, rows)
+            if rows:
+                cur.executemany(sql, rows)
         conn.commit()
-    logger.info('[DB] 寫入 %d 筆篩選記錄（%s guild:%s）', len(rows), screen_date, guild_id)
+    logger.info('[DB] 寫入 %d 筆篩選記錄（%s guild:%s）',
+                len(rows), screen_date, guild_id)
 
 
 def get_records_needing_t1_check(before_date):
-    """撈 fill_status='pending' 且 screen_date < before_date 的紀錄。watch 不會被撈出。"""
+    """撈 fill_status='pending' 且 screen_date < before_date 的紀錄。"""
     sql = """
-    SELECT id, guild_id, screen_date, sid, name, close_price,
-           entry_zone_low, entry_zone_high, chase_mode
+    SELECT id, guild_id, screen_date, sid, name, close_price
     FROM screen_records
     WHERE fill_status = 'pending' AND screen_date < %s
     ORDER BY screen_date, sid

@@ -5,3 +5,7 @@ __pycache__/
 .venv/
 backtest_data/
 backtest_results.csv
+
+# Local-only helper files (PR drafts, scratch notes — never committed)
+.pr-description-draft.md
+.scratch/
