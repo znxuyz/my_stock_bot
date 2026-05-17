@@ -2,11 +2,15 @@
 管理 slash commands（v6.2）：
   /backfill — 手動補抓 T86 歷史
   /health   — 系統健康檢查（schema / 表完整性 / 今日筆數）
+  /diag     — TWSE endpoint 連通性診斷（找出哪個 URL 路徑還活著）
 
 開放給所有伺服器成員使用（不限管理員）。
 """
 import logging
+import time
 from datetime import date, timedelta
+
+import requests
 
 import config
 from tools.backfill_t86_history import backfill
@@ -20,6 +24,125 @@ _STATUS_COLOR = {
     'failure': 0xF85149,
     'info':    0x58A6FF,
 }
+
+
+# v6.2.2：TWSE endpoint 診斷用候選 URL（按 endpoint 分組）。
+# 每個 endpoint 有多個歷史候選；/diag 會逐一打看哪個回 200。
+# 第一個欄位是 label，第二個是 URL template（含 {date} placeholder）。
+_TWSE_DIAG_TARGETS = {
+    'MI_INDEX (每日收盤)': [
+        ('current /rwd/zh/', 'https://www.twse.com.tw/rwd/zh/afterTrading/MI_INDEX?response=csv&date={date}&type=ALLBUT0999'),
+        ('legacy /exchangeReport/', 'https://www.twse.com.tw/exchangeReport/MI_INDEX?response=csv&date={date}&type=ALLBUT0999'),
+        ('OpenAPI v1', 'https://openapi.twse.com.tw/v1/exchangeReport/MI_INDEX20'),
+    ],
+    'T86 (法人買賣超)': [
+        ('current /rwd/zh/', 'https://www.twse.com.tw/rwd/zh/fund/T86?response=csv&date={date}&selectType=ALLBUT0999'),
+        ('legacy /fund/', 'https://www.twse.com.tw/fund/T86?response=csv&date={date}&selectType=ALLBUT0999'),
+        ('OpenAPI v1', 'https://openapi.twse.com.tw/v1/fund/T86'),
+    ],
+    'STOCK_DAY (個股日)': [
+        ('current /rwd/zh/', 'https://www.twse.com.tw/rwd/zh/afterTrading/STOCK_DAY?response=csv&date={date}&stockNo=2330'),
+        ('legacy /exchangeReport/', 'https://www.twse.com.tw/exchangeReport/STOCK_DAY?response=csv&date={date}&stockNo=2330'),
+        ('OpenAPI v1', 'https://openapi.twse.com.tw/v1/exchangeReport/STOCK_DAY_ALL'),
+    ],
+    'MI_MARGN (融資融券)': [
+        ('current /rwd/zh/', 'https://www.twse.com.tw/rwd/zh/marginTrading/MI_MARGN?response=csv&date={date}&selectType=ALL'),
+        ('legacy /exchangeReport/', 'https://www.twse.com.tw/exchangeReport/MI_MARGN?response=csv&date={date}&selectType=ALL'),
+    ],
+    'MI_QFIIS (大盤外資)': [
+        ('current /rwd/zh/', 'https://www.twse.com.tw/rwd/zh/fund/MI_QFIIS?response=csv&date={date}&selectType=ALLBUT0999'),
+        ('legacy /fund/', 'https://www.twse.com.tw/fund/MI_QFIIS?response=csv&date={date}&selectType=ALLBUT0999'),
+    ],
+    'TWSE 首頁（連線健康度）': [
+        ('homepage', 'https://www.twse.com.tw/'),
+    ],
+}
+
+
+def _probe_url(url, timeout=10):
+    """單一 URL 探測。回 dict 含 status_code / elapsed / body_head / error。"""
+    t0 = time.time()
+    try:
+        r = requests.get(url, headers=config.TWSE_HEADERS,
+                         timeout=timeout, verify=config.TWSE_VERIFY_SSL)
+        elapsed = time.time() - t0
+        body = r.text[:80].replace('\n', ' ').replace('\r', ' ')
+        return {
+            'status_code': r.status_code,
+            'elapsed': round(elapsed, 2),
+            'body_head': body,
+            'error': None,
+        }
+    except requests.exceptions.Timeout:
+        return {'status_code': None, 'elapsed': round(time.time() - t0, 2),
+                'body_head': '', 'error': 'TIMEOUT'}
+    except Exception as e:
+        return {'status_code': None, 'elapsed': round(time.time() - t0, 2),
+                'body_head': '', 'error': str(e)[:80]}
+
+
+def _format_probe_line(label, result):
+    code = result['status_code']
+    if code is None:
+        mark, code_str = '⚠️', f'ERR ({result["error"]})'
+    elif 200 <= code < 300:
+        mark, code_str = '✅', str(code)
+    elif 300 <= code < 400:
+        mark, code_str = '↪️', str(code)
+    elif 400 <= code < 500:
+        mark, code_str = '❌', str(code)
+    else:
+        mark, code_str = '🔥', str(code)
+    return f'{mark} `{label}` → **{code_str}** ({result["elapsed"]}s)'
+
+
+def cmd_diag_core(target_date=None):
+    """測試多個 TWSE endpoint 的候選 URL，回 Embed dict。
+
+    target_date 預設用「昨天」(避免今日資料還沒上架)；可傳 YYYYMMDD 字串。
+    """
+    if target_date is None:
+        # 昨天工作日
+        d = date.today() - timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= timedelta(days=1)
+        target_date = d.strftime('%Y%m%d')
+
+    fields = []
+    success_total = 0
+    total_probes = 0
+
+    for endpoint_label, candidates in _TWSE_DIAG_TARGETS.items():
+        lines = []
+        any_success = False
+        for cand_label, url_template in candidates:
+            url = url_template.replace('{date}', target_date)
+            result = _probe_url(url)
+            lines.append(_format_probe_line(cand_label, result))
+            total_probes += 1
+            if result['status_code'] and 200 <= result['status_code'] < 300:
+                success_total += 1
+                any_success = True
+        prefix = '✅ ' if any_success else '❌ '
+        fields.append({
+            'name': f'{prefix}{endpoint_label}',
+            'value': '\n'.join(lines)[:1020],  # Discord field value 1024 字元上限
+            'inline': False,
+        })
+
+    if success_total == total_probes:
+        color, title = _STATUS_COLOR['success'], '🩺 TWSE 連線診斷 ✅ 全綠'
+    elif success_total == 0:
+        color, title = _STATUS_COLOR['failure'], '🩺 TWSE 連線診斷 ❌ 全部失敗'
+    else:
+        color, title = _STATUS_COLOR['partial'], '🩺 TWSE 連線診斷 ⚠️ 部分成功'
+
+    return {
+        'title': title,
+        'description': f'測試日期：`{target_date}` · 成功 {success_total}/{total_probes}',
+        'color': color,
+        'fields': fields,
+    }
 
 
 def _trim(items, max_n=15):

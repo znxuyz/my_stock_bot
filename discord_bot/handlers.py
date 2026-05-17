@@ -14,7 +14,7 @@ from format_utils import fmt_share, get_opt
 from time_utils import get_target_date, tw_now
 
 from discord_bot.admin_commands import (
-    cmd_backfill_core, cmd_health_core,
+    cmd_backfill_core, cmd_diag_core, cmd_health_core,
 )
 from discord_bot.basic_commands import cmd_fortune, cmd_help, cmd_poll, cmd_roast
 from discord_bot.challenge_commands import cmd_challenge
@@ -403,12 +403,12 @@ class InteractionHandler(BaseHTTPRequestHandler):
         return True
 
     def _handle_admin(self, cmd, opts, body, token):
-        """v6.2 系統管理指令（/backfill /health）。開放給所有成員使用。
+        """v6.2 系統管理指令（/backfill /health /diag）。開放給所有成員使用。
 
         必須先 defer（送 type=5）才能 spawn 背景 thread，否則 Discord 3 秒沒收到
         ACK 就會把 interaction 標記為 failed → "Thinking…" 卡死。
         """
-        if cmd not in ('backfill', 'health'):
+        if cmd not in ('backfill', 'health', 'diag'):
             return False
 
         # === 1. 立即 defer 並 flush（send_json 已包含 flush）===
@@ -429,6 +429,13 @@ class InteractionHandler(BaseHTTPRequestHandler):
             threading.Thread(target=_bg_admin_run, daemon=True,
                              args=('/health', token, channel_id,
                                    cmd_health_core)
+                             ).start()
+            return True
+
+        if cmd == 'diag':
+            threading.Thread(target=_bg_admin_run, daemon=True,
+                             args=('/diag', token, channel_id,
+                                   cmd_diag_core)
                              ).start()
             return True
 

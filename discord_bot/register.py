@@ -61,6 +61,7 @@ _COMMANDS = [
      'options': [{'name': 'days', 'description': '往回抓 N 個交易日（1~60，預設 10）',
                   'type': 4, 'required': False}]},
     {'name': 'health',   'description': '🩺 系統健康檢查：schema / 資料表完整性 / 今日筆數'},
+    {'name': 'diag',     'description': '🌐 TWSE endpoint 連通性診斷（看哪個 URL 還活著）'},
 ]
 
 
