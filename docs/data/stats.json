@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-05-19 17:18:28",
+  "updated_at": "2026-06-22 17:20:30",
   "summary": {
-    "total": 1,
+    "total": 2,
     "filled": 0,
     "missed": 0,
-    "pending": 1,
+    "pending": 2,
     "settled1": 0,
     "win1": 0,
     "avg_ret1": null,
@@ -25,10 +25,10 @@
   "by_status": [
     {
       "status": "SETUP",
-      "total": 1,
+      "total": 2,
       "filled": 0,
       "missed": 0,
-      "pending": 1,
+      "pending": 2,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -42,6 +42,13 @@
   ],
   "by_bias": [
     {
+      "bias_zone": "偏冷(1~2%)",
+      "total": 1,
+      "settled": 0,
+      "win": 0,
+      "avg_ret": null
+    },
+    {
       "bias_zone": "邊界(2~3%)",
       "total": 1,
       "settled": 0,
@@ -50,6 +57,13 @@
     }
   ],
   "by_month": [
+    {
+      "ym": "2026-06",
+      "total": 1,
+      "settled": 0,
+      "win": 0,
+      "avg_ret": null
+    },
     {
       "ym": "2026-05",
       "total": 1,
