@@ -1,168 +1,168 @@
 {
-  "updated_at": "2026-07-06 17:23:31",
-  "screen_date": "20260706",
+  "updated_at": "2026-07-07 17:15:32",
+  "screen_date": "20260707",
   "buyers": [
     {
-      "sid": "3481",
-      "name": "群創",
-      "foreign": 117995548,
-      "trust": -11000,
-      "close": 69.2,
-      "change_pct": 4.85
-    },
-    {
-      "sid": "2409",
-      "name": "友達",
-      "foreign": 90691332,
-      "trust": -10000,
-      "close": 31.7,
-      "change_pct": 5.67
-    },
-    {
-      "sid": "1717",
-      "name": "長興",
-      "foreign": 23669763,
-      "trust": -5000,
-      "close": 85.4,
-      "change_pct": 4.66
-    },
-    {
-      "sid": "2890",
-      "name": "永豐金",
-      "foreign": 21846843,
-      "trust": 2671655,
-      "close": 41.0,
-      "change_pct": 3.27
-    },
-    {
-      "sid": "1314",
-      "name": "中石化",
-      "foreign": 21469418,
-      "trust": 0,
-      "close": 10.4,
-      "change_pct": 5.26
-    },
-    {
-      "sid": "2882",
-      "name": "國泰金",
-      "foreign": 20450802,
-      "trust": -2760925,
-      "close": 93.4,
-      "change_pct": -0.21
+      "sid": "2887",
+      "name": "台新新光金",
+      "foreign": 29635403,
+      "trust": -7035485,
+      "close": 34.9,
+      "change_pct": 1.75
     },
     {
       "sid": "2883",
       "name": "凱基金",
-      "foreign": 20335651,
-      "trust": -2783264,
-      "close": 29.0,
-      "change_pct": 1.93
+      "foreign": 25976736,
+      "trust": -3099103,
+      "close": 30.1,
+      "change_pct": 3.79
     },
     {
-      "sid": "8150",
-      "name": "南茂",
-      "foreign": 17467404,
-      "trust": 467000,
-      "close": 115.5,
-      "change_pct": 10.0
+      "sid": "2882",
+      "name": "國泰金",
+      "foreign": 17042015,
+      "trust": -3276307,
+      "close": 97.0,
+      "change_pct": 3.85
+    },
+    {
+      "sid": "2618",
+      "name": "長榮航",
+      "foreign": 14825671,
+      "trust": 6320192,
+      "close": 42.4,
+      "change_pct": -2.64
+    },
+    {
+      "sid": "2834",
+      "name": "臺企銀",
+      "foreign": 14608328,
+      "trust": -16371,
+      "close": 18.1,
+      "change_pct": 0.56
     },
     {
       "sid": "2884",
       "name": "玉山金",
-      "foreign": 16287809,
-      "trust": -3750635,
-      "close": 34.45,
-      "change_pct": 2.23
+      "foreign": 14524102,
+      "trust": -3370540,
+      "close": 34.5,
+      "change_pct": 0.15
     },
     {
-      "sid": "2449",
-      "name": "京元電子",
-      "foreign": 15875277,
-      "trust": 869275,
-      "close": 351.0,
-      "change_pct": 4.78
-    }
-  ],
-  "sellers": [
-    {
-      "sid": "1714",
-      "name": "和桐",
-      "foreign": -39312675,
-      "trust": 0,
-      "close": 20.9,
-      "change_pct": -8.13
+      "sid": "2892",
+      "name": "第一金",
+      "foreign": 12146074,
+      "trust": 7696185,
+      "close": 33.3,
+      "change_pct": 0.76
     },
     {
       "sid": "6770",
       "name": "力積電",
-      "foreign": -34975864,
-      "trust": 673000,
-      "close": 72.6,
-      "change_pct": -1.09
+      "foreign": 9979729,
+      "trust": -14000,
+      "close": 70.1,
+      "change_pct": -3.44
     },
     {
-      "sid": "2344",
-      "name": "華邦電",
-      "foreign": -25653888,
-      "trust": -1416374,
-      "close": 183.0,
-      "change_pct": -0.81
-    },
-    {
-      "sid": "1326",
-      "name": "台化",
-      "foreign": -15398312,
-      "trust": 856000,
-      "close": 67.6,
-      "change_pct": -0.59
+      "sid": "1314",
+      "name": "中石化",
+      "foreign": 9572027,
+      "trust": 0,
+      "close": 9.77,
+      "change_pct": -6.06
     },
     {
       "sid": "3042",
       "name": "晶技",
-      "foreign": -14791333,
+      "foreign": 8458050,
+      "trust": 133000,
+      "close": 210.0,
+      "change_pct": -6.46
+    }
+  ],
+  "sellers": [
+    {
+      "sid": "3481",
+      "name": "群創",
+      "foreign": -113940857,
+      "trust": 180218,
+      "close": 64.2,
+      "change_pct": -7.23
+    },
+    {
+      "sid": "2409",
+      "name": "友達",
+      "foreign": -73957349,
+      "trust": 14747,
+      "close": 29.35,
+      "change_pct": -7.41
+    },
+    {
+      "sid": "2891",
+      "name": "中信金",
+      "foreign": -21422034,
+      "trust": 2869653,
+      "close": 70.2,
+      "change_pct": -1.68
+    },
+    {
+      "sid": "2002",
+      "name": "中鋼",
+      "foreign": -18837180,
+      "trust": -172000,
+      "close": 18.6,
+      "change_pct": -2.11
+    },
+    {
+      "sid": "2317",
+      "name": "鴻海",
+      "foreign": -17933596,
+      "trust": 1754025,
+      "close": 237.0,
+      "change_pct": -2.07
+    },
+    {
+      "sid": "1714",
+      "name": "和桐",
+      "foreign": -17637475,
       "trust": 0,
-      "close": 224.5,
-      "change_pct": -9.84
+      "close": 18.85,
+      "change_pct": -9.81
     },
     {
-      "sid": "1718",
-      "name": "中纖",
-      "foreign": -14066712,
+      "sid": "1802",
+      "name": "台玻",
+      "foreign": -17292023,
       "trust": 0,
-      "close": 15.2,
-      "change_pct": 1.67
+      "close": 64.6,
+      "change_pct": -4.86
     },
     {
-      "sid": "3231",
-      "name": "緯創",
-      "foreign": -13773544,
-      "trust": 3477540,
-      "close": 158.0,
-      "change_pct": -0.63
+      "sid": "1717",
+      "name": "長興",
+      "foreign": -14571758,
+      "trust": 1000,
+      "close": 77.1,
+      "change_pct": -9.72
     },
     {
-      "sid": "2634",
-      "name": "漢翔",
-      "foreign": -12564165,
-      "trust": 67000,
-      "close": 60.3,
-      "change_pct": 0.5
+      "sid": "2449",
+      "name": "京元電子",
+      "foreign": -12117362,
+      "trust": -1534339,
+      "close": 317.0,
+      "change_pct": -9.69
     },
     {
-      "sid": "2337",
-      "name": "旺宏",
-      "foreign": -10957427,
-      "trust": 12000,
-      "close": 144.5,
-      "change_pct": 1.4
-    },
-    {
-      "sid": "9904",
-      "name": "寶成",
-      "foreign": -10157000,
-      "trust": -6744,
-      "close": 24.35,
-      "change_pct": -0.41
+      "sid": "3037",
+      "name": "欣興",
+      "foreign": -11837734,
+      "trust": -537000,
+      "close": 840.0,
+      "change_pct": -8.4
     }
   ]
 }
