@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-07-13 17:20:06",
+  "updated_at": "2026-07-14 17:19:02",
   "summary": {
-    "total": 11,
+    "total": 16,
     "filled": 0,
     "missed": 0,
-    "pending": 11,
+    "pending": 16,
     "settled1": 0,
     "win1": 0,
     "avg_ret1": null,
@@ -16,19 +16,19 @@
   },
   "counts": {
     "momentum": 1,
-    "active": 1,
-    "setup": 0,
+    "active": 2,
+    "setup": 2,
     "watch": 0,
     "noise": 0,
-    "total_pushed": 2
+    "total_pushed": 5
   },
   "by_status": [
     {
       "status": "MOMENTUM",
-      "total": 1,
+      "total": 2,
       "filled": 0,
       "missed": 0,
-      "pending": 1,
+      "pending": 2,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -41,10 +41,10 @@
     },
     {
       "status": "ACTIVE",
-      "total": 4,
+      "total": 6,
       "filled": 0,
       "missed": 0,
-      "pending": 4,
+      "pending": 6,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -57,10 +57,10 @@
     },
     {
       "status": "SETUP",
-      "total": 6,
+      "total": 8,
       "filled": 0,
       "missed": 0,
-      "pending": 6,
+      "pending": 8,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -75,21 +75,21 @@
   "by_bias": [
     {
       "bias_zone": "偏冷(1~2%)",
-      "total": 4,
+      "total": 7,
       "settled": 0,
       "win": 0,
       "avg_ret": null
     },
     {
       "bias_zone": "極冷(≤1%)",
-      "total": 3,
+      "total": 4,
       "settled": 0,
       "win": 0,
       "avg_ret": null
     },
     {
       "bias_zone": "邊界(2~3%)",
-      "total": 4,
+      "total": 5,
       "settled": 0,
       "win": 0,
       "avg_ret": null
@@ -98,7 +98,7 @@
   "by_month": [
     {
       "ym": "2026-07",
-      "total": 6,
+      "total": 11,
       "settled": 0,
       "win": 0,
       "avg_ret": null
