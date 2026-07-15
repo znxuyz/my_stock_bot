@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-07-14 17:19:02",
+  "updated_at": "2026-07-15 17:25:08",
   "summary": {
-    "total": 16,
+    "total": 18,
     "filled": 0,
     "missed": 0,
-    "pending": 16,
+    "pending": 18,
     "settled1": 0,
     "win1": 0,
     "avg_ret1": null,
@@ -16,19 +16,19 @@
   },
   "counts": {
     "momentum": 1,
-    "active": 2,
-    "setup": 2,
+    "active": 1,
+    "setup": 0,
     "watch": 0,
     "noise": 0,
-    "total_pushed": 5
+    "total_pushed": 2
   },
   "by_status": [
     {
       "status": "MOMENTUM",
-      "total": 2,
+      "total": 3,
       "filled": 0,
       "missed": 0,
-      "pending": 2,
+      "pending": 3,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -41,10 +41,10 @@
     },
     {
       "status": "ACTIVE",
-      "total": 6,
+      "total": 7,
       "filled": 0,
       "missed": 0,
-      "pending": 6,
+      "pending": 7,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -89,7 +89,7 @@
     },
     {
       "bias_zone": "邊界(2~3%)",
-      "total": 5,
+      "total": 7,
       "settled": 0,
       "win": 0,
       "avg_ret": null
@@ -98,7 +98,7 @@
   "by_month": [
     {
       "ym": "2026-07",
-      "total": 11,
+      "total": 13,
       "settled": 0,
       "win": 0,
       "avg_ret": null
