@@ -1,10 +1,10 @@
 {
-  "updated_at": "2026-07-15 17:25:08",
+  "updated_at": "2026-07-16 17:22:15",
   "summary": {
-    "total": 18,
+    "total": 19,
     "filled": 0,
     "missed": 0,
-    "pending": 18,
+    "pending": 19,
     "settled1": 0,
     "win1": 0,
     "avg_ret1": null,
@@ -15,12 +15,12 @@
     "worst_ret1": null
   },
   "counts": {
-    "momentum": 1,
-    "active": 1,
-    "setup": 0,
+    "momentum": 0,
+    "active": 0,
+    "setup": 1,
     "watch": 0,
     "noise": 0,
-    "total_pushed": 2
+    "total_pushed": 1
   },
   "by_status": [
     {
@@ -57,10 +57,10 @@
     },
     {
       "status": "SETUP",
-      "total": 8,
+      "total": 9,
       "filled": 0,
       "missed": 0,
-      "pending": 8,
+      "pending": 9,
       "settled1": 0,
       "settled2": 0,
       "win1": 0,
@@ -82,7 +82,7 @@
     },
     {
       "bias_zone": "極冷(≤1%)",
-      "total": 4,
+      "total": 5,
       "settled": 0,
       "win": 0,
       "avg_ret": null
@@ -98,7 +98,7 @@
   "by_month": [
     {
       "ym": "2026-07",
-      "total": 13,
+      "total": 14,
       "settled": 0,
       "win": 0,
       "avg_ret": null
